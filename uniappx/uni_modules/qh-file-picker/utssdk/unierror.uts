@@ -1,0 +1,26 @@
+import { QhPickerErrorCode, QhPickerFail } from './interface.uts'
+
+/** 错误主题 */
+export const UniErrorSubject = 'qh-file-picker'
+
+/** 错误码 → 文案 */
+export const QhPickerErrors: Map<QhPickerErrorCode, string> = new Map([
+  [9020001, '当前平台不支持文件选择'],
+  [9020002, '已取消选择'],
+  [9020003, '未获取到文件地址'],
+  [9020004, '读取文件失败'],
+  [9020005, '无法启动系统文件选择器'],
+  [9020006, '没有读取该文件的权限'],
+])
+
+/** 错误对象实现 */
+export class QhPickerFailImpl extends UniError implements QhPickerFail {
+  override errCode: QhPickerErrorCode
+
+  constructor(errCode: QhPickerErrorCode) {
+    super()
+    this.errSubject = UniErrorSubject
+    this.errCode = errCode
+    this.errMsg = QhPickerErrors.get(errCode) ?? ''
+  }
+}

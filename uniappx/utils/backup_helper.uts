@@ -1,0 +1,100 @@
+// 备份助手：把 NAS 上的文件 / 照片批量加入本机下载队列
+import { api } from './syno.uts'
+import { startDownload } from './download_manager.uts'
+
+export type BackupResult = {
+  files: number
+  dirs: number
+  truncated: boolean
+}
+
+/** 取路径的父目录名（用于给同名文件加前缀，避免下载目录互相覆盖） */
+function parentName(p: string): string {
+  const parts = p.split('/')
+  if (parts.length >= 2) {
+    const name = parts[parts.length - 2]
+    if (name.length > 0) return name
+  }
+  return ''
+}
+
+/**
+ * 递归备份 NAS 文件夹到本机
+ * @param folderPath 起始目录
+ * @param maxFiles 单次最多加入的文件数（防止误操作把几万个文件塞进队列）
+ * @param onProgress 进度文案回调
+ */
+export async function backupFolder(
+  folderPath: string,
+  maxFiles: number,
+  onProgress: (text: string) => void
+): Promise<BackupResult> {
+  const dirs: Array<string> = [folderPath]
+  let i = 0
+  let files = 0
+  let truncated = false
+
+  while (i < dirs.length) {
+    const cur = dirs[i]
+    i = i + 1
+    const list = await api.listFiles(cur)
+    for (let k = 0; k < list.length; k++) {
+      const it = list[k]
+      if (it.isDir) {
+        dirs.push(it.path)
+      } else {
+        if (files >= maxFiles) {
+          truncated = true
+          break
+        }
+        const pre = parentName(it.path)
+        const saveName = pre.length > 0 ? pre + '_' + it.name : it.name
+        startDownload(api.downloadFileUrl(it.path), saveName, it.path, false)
+        files = files + 1
+      }
+    }
+    if (truncated) break
+    onProgress('已扫描 ' + i + ' 个目录 · 加入 ' + files + ' 个文件')
+  }
+
+  const r: BackupResult = { files: files, dirs: i, truncated: truncated }
+  return r
+}
+
+/**
+ * 备份相册照片 / 视频到本机（按时间线分页拉取）
+ * @param shared true=共享空间，false=个人空间
+ * @param maxFiles 单次最多加入的文件数
+ */
+export async function backupPhotos(
+  shared: boolean,
+  maxFiles: number,
+  onProgress: (text: string) => void
+): Promise<BackupResult> {
+  const pageSize = 100
+  let offset = 0
+  let files = 0
+  let truncated = false
+
+  while (true) {
+    const r = await api.listPhotos(shared, offset, pageSize)
+    if (r.list.length === 0) break
+    for (let i = 0; i < r.list.length; i++) {
+      if (files >= maxFiles) {
+        truncated = true
+        break
+      }
+      const p = r.list[i]
+      const nm = p.fileName.length > 0 ? p.fileName : 'photo_' + p.unitId + '.jpg'
+      startDownload(api.photoDownloadUrl(p, shared), nm, nm, false)
+      files = files + 1
+    }
+    if (truncated) break
+    offset = offset + r.list.length
+    onProgress('已加入 ' + files + ' 张照片')
+    if (r.list.length < pageSize) break
+  }
+
+  const res: BackupResult = { files: files, dirs: 0, truncated: truncated }
+  return res
+}

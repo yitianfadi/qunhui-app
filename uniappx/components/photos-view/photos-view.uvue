@@ -1,0 +1,193 @@
+<template>
+  <view class="photos-page">
+    <view class="seg-bar">
+      <text class="seg-item" :class="!shared ? 'seg-active' : ''" @click="switchSpace(false)">个人空间</text>
+      <text class="seg-item" :class="shared ? 'seg-active' : ''" @click="switchSpace(true)">共享空间</text>
+    </view>
+
+    <scroll-view class="photo-scroll" direction="vertical" @scrolltolower="loadMore">
+      <text v-if="errorMsg.length > 0" class="text-error error-center">{{ errorMsg }}</text>
+      <text v-if="errorMsg.length > 0" class="retry-btn" @click="reload">重试</text>
+
+      <view v-if="photos.length > 0" class="grid">
+        <view v-for="(p, index) in photos" :key="index" class="grid-item" @click="preview(p)">
+          <image class="thumb" :src="api.thumbUrl(p, shared, 'md')" mode="aspectFill" />
+          <text v-if="p.isVideo === true" class="video-badge">▶</text>
+        </view>
+      </view>
+      <view v-else-if="errorMsg.length === 0 && photos.length === 0" class="empty-box">
+        <text class="text-secondary">暂无照片</text>
+      </view>
+      <view class="bottom-space" />
+    </scroll-view>
+
+    <!-- 预览弹窗 -->
+    <view v-if="previewItem != null" class="mask" @click="previewItem = null">
+      <view class="preview-box" @click.stop="">
+        <image class="preview-img" :src="api.thumbUrl(previewItem!, shared, 'xl')" mode="aspectFit" />
+        <view class="preview-bar">
+          <text class="preview-name">{{ previewItem!.fileName }}</text>
+          <text class="preview-action" @click="downloadPhoto">⬇️ 原图</text>
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { api, PhotoItem } from '@/utils/syno.uts'
+import { startDownload } from '@/utils/download_manager.uts'
+
+const shared = ref(false)
+const photos = ref<Array<PhotoItem>>([])
+const errorMsg = ref('')
+const previewItem = ref<PhotoItem | null>(null)
+const offset = ref(0)
+const PAGE_SIZE = 90
+
+async function loadMore() {
+  try {
+    const r = await api.listPhotos(shared.value, offset.value, PAGE_SIZE)
+    if (r.list.length > 0) {
+      photos.value = photos.value.concat(r.list)
+      offset.value = offset.value + r.list.length
+    }
+    errorMsg.value = ''
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function reload() {
+  photos.value = []
+  offset.value = 0
+  loadMore()
+}
+
+function switchSpace(toShared: boolean) {
+  if (shared.value === toShared) return
+  shared.value = toShared
+  reload()
+}
+
+loadMore()
+
+function preview(p: PhotoItem) {
+  previewItem.value = p
+}
+
+function downloadPhoto() {
+  const p = previewItem.value
+  if (p == null) return
+  const name = p.fileName.length > 0 ? p.fileName : 'photo_' + p.unitId + '.jpg'
+  // 统一走下载队列（App 端后台下载，Web 端交给浏览器）
+  startDownload(api.photoDownloadUrl(p, shared.value), name, '/photo/' + name)
+  previewItem.value = null
+  // #ifdef WEB
+  uni.showToast({ title: '已开始浏览器下载', icon: 'none' })
+  // #endif
+  // #ifndef WEB
+  uni.showToast({ title: '已加入下载列表', icon: 'none' })
+  // #endif
+}
+</script>
+
+<style>
+  .photos-page {
+    flex: 1;
+    flex-direction: column;
+  }
+  .seg-bar {
+    flex-direction: row;
+    justify-content: center;
+    padding: 8px 0;
+    background-color: #ffffff;
+  }
+  .seg-item {
+    font-size: 14px;
+    color: #666666;
+    padding: 6px 24px;
+    margin: 0 8px;
+    border-radius: 16px;
+  }
+  .seg-active {
+    color: #ffffff;
+    background-color: #1e6bb8;
+  }
+  .photo-scroll {
+    flex: 1;
+  }
+  .grid {
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding: 2px;
+  }
+  .grid-item {
+    width: 124px;
+    height: 124px;
+    margin: 1px;
+  }
+  .thumb {
+    width: 124px;
+    height: 124px;
+    background-color: #e8eef5;
+  }
+  .video-badge {
+    position: absolute;
+    right: 6px;
+    bottom: 6px;
+    color: #ffffff;
+    font-size: 14px;
+  }
+  .error-center {
+    width: 100%;
+    text-align: center;
+    padding: 24px 12px 4px 12px;
+  }
+  .retry-btn {
+    align-self: center;
+    text-align: center;
+    color: #1e6bb8;
+    padding: 8px;
+  }
+  .empty-box {
+    padding: 48px;
+    align-items: center;
+  }
+  .bottom-space {
+    height: 60px;
+  }
+  .mask {
+    position: fixed;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.85);
+    align-items: center;
+    justify-content: center;
+  }
+  .preview-box {
+    flex-direction: column;
+    align-items: center;
+  }
+  .preview-img {
+    width: 640px;
+    height: 480px;
+  }
+  .preview-bar {
+    flex-direction: row;
+    align-items: center;
+    margin-top: 12px;
+  }
+  .preview-name {
+    color: #ffffff;
+    font-size: 14px;
+    margin-right: 20px;
+  }
+  .preview-action {
+    color: #7cc0ff;
+    font-size: 14px;
+  }
+</style>

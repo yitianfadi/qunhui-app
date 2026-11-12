@@ -1,0 +1,462 @@
+<template>
+  <scroll-view class="set-page" direction="vertical">
+    <!-- 账号信息卡 -->
+    <view class="account-card">
+      <view class="acc-head">
+        <image class="acc-logo" src="/static/logo_192.png" mode="aspectFit" />
+        <view class="acc-info">
+          <text class="acc-name" max-lines="1">{{ accountName }}</text>
+          <text class="acc-addr" max-lines="1">{{ accountAddr }}</text>
+        </view>
+        <view class="acc-badge">
+          <text class="acc-badge-text">已连接</text>
+        </view>
+      </view>
+      <view class="acc-divider" />
+      <view class="acc-meta">
+        <text class="acc-meta-label">用户</text>
+        <text class="acc-meta-value" max-lines="1">{{ accountUser }}</text>
+      </view>
+      <view class="acc-meta">
+        <text class="acc-meta-label">连接方式</text>
+        <text class="acc-meta-value">{{ linkMode }}</text>
+      </view>
+    </view>
+
+    <!-- 传输 -->
+    <text class="group-title">传输</text>
+    <view class="card">
+      <view class="row" @click="openDownloads">
+        <text class="row-icon">⬇️</text>
+        <text class="row-title">下载管理</text>
+        <text v-if="activeCount > 0" class="badge">{{ activeCount }}</text>
+        <text class="row-value">{{ dlHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+      <view class="row row-line" @click="openBackup">
+        <text class="row-icon">🔄</text>
+        <text class="row-title">备份与恢复</text>
+        <text v-if="upActive > 0" class="badge">{{ upActive }}</text>
+        <text class="row-value">{{ backupHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+    </view>
+
+    <!-- 应用信息 -->
+    <text class="group-title">应用</text>
+    <view class="card">
+      <view class="row">
+        <text class="row-icon">ℹ️</text>
+        <text class="row-title">关于</text>
+        <text class="row-value">群晖助手</text>
+      </view>
+      <view class="row row-line">
+        <text class="row-icon">🔖</text>
+        <text class="row-title">版本</text>
+        <text class="row-value">v{{ appVersion }}</text>
+      </view>
+      <view class="row row-line" @click="checkUpdate">
+        <text class="row-icon">⬆️</text>
+        <text class="row-title">检查更新</text>
+        <text class="row-value">{{ updateHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+      <view class="row row-line">
+        <text class="row-icon">🗄️</text>
+        <text class="row-title">适配 DSM</text>
+        <text class="row-value">7.x（含 7.4）</text>
+      </view>
+      <view class="row row-line">
+        <text class="row-icon">🧩</text>
+        <text class="row-title">功能模块</text>
+        <text class="row-value">文件 · 照片 · 下载</text>
+      </view>
+    </view>
+
+    <!-- 退出登录 -->
+    <view class="card logout-card" @click="confirmLogout">
+      <text class="logout-text">退出登录</text>
+    </view>
+
+    <text class="footer">群晖助手 · uni-app X 蒸汽模式</text>
+    <view class="bottom-space" />
+  </scroll-view>
+</template>
+
+<script setup>
+import { computed, ref } from 'vue'
+import { api } from '@/utils/syno.uts'
+import { dlActiveCount, dlDoneCount } from '@/utils/download_manager.uts'
+import { upActiveCount, upDoneCount } from '@/utils/upload_manager.uts'
+import {
+  currentVersion,
+  compareVersion,
+  fetchLatestRelease,
+  downloadApk,
+  AppRelease,
+} from '@/utils/update_checker.uts'
+
+const account = api.account
+
+const emit = defineEmits(['logout'])
+
+const accountName = account != null ? account.name : '未连接'
+
+/**
+ * 从 QuickConnect 智能直连域名里解析内网 IP
+ * 例：192-168-1-5.abc123.direct.quickconnect.cn → 192.168.1.5
+ */
+function ipFromQcHost(host: string): string {
+  const dot = host.indexOf('.')
+  const head = dot > 0 ? host.slice(0, dot) : host
+  const parts = head.split('-')
+  if (parts.length !== 4) return ''
+  for (let i = 0; i < parts.length; i++) {
+    if (isNaN(parseInt(parts[i]))) return ''
+  }
+  return parts.join('.')
+}
+
+/** 连接地址：优先用用户填的直连地址，QuickConnect 模式回落到实际连接成功的端点 */
+function addrText(): string {
+  const acc = api.account
+  if (acc != null && acc.host.length > 0) {
+    return acc.protocol + '://' + acc.host + ':' + acc.port
+  }
+  const base = api.lastGood
+  if (base.length > 0) {
+    let b = base
+    if (b.indexOf('https://') === 0) {
+      b = b.slice(8)
+    } else if (b.indexOf('http://') === 0) {
+      b = b.slice(7)
+    }
+    const ip = ipFromQcHost(b)
+    if (ip.length > 0) return ip + ' · 智能直连'
+    return b
+  }
+  return '自动选择端点'
+}
+
+const accountAddr = addrText()
+const accountUser = account != null ? account.username : '-'
+
+// 当前版本号：app 端读原生安装包 versionName，H5 读 manifest 版本
+const appVersion = currentVersion()
+
+// --- 检查更新状态机：idle → checking → downloading → installing ---
+const updState = ref('idle')
+const updProgress = ref(0)
+const updLatest = ref('')
+
+const updateHint = computed(() => {
+  const st = updState.value
+  if (st === 'checking') return '检查中…'
+  if (st === 'downloading') return '下载 ' + updProgress.value.toString() + '%'
+  if (st === 'installing') return '安装中…'
+  if (updLatest.value.length > 0) return 'v' + updLatest.value + ' 可用'
+  return '检查'
+})
+
+function linkModeText(): string {
+  let mode = '直连'
+  if (api.lastGoodLabel.length > 0) {
+    mode = api.lastGoodLabel
+  } else {
+    const acc = api.account
+    if (acc != null && acc.transport === 'quickconnect') {
+      mode = 'QuickConnect'
+    }
+  }
+  // QuickConnect 智能直连（内网域名）时标注清楚，它实际仍走局域网
+  if (api.lastGood.indexOf('quickconnect') >= 0 && (mode === 'LAN直连' || mode === 'WAN直连')) {
+    mode = 'QC 智能直连'
+  }
+  // #ifdef WEB
+  mode = 'Web 代理转发'
+  // #endif
+  return mode
+}
+
+const linkMode = linkModeText()
+
+const activeCount = computed(() => dlActiveCount())
+const doneCount = computed(() => dlDoneCount())
+
+const dlHint = computed(() => {
+  if (activeCount.value > 0) return '进行中'
+  if (doneCount.value > 0) return '已完成 ' + doneCount.value
+  return '暂无任务'
+})
+
+const upActive = computed(() => upActiveCount())
+
+const upDone = computed(() => upDoneCount())
+
+const backupHint = computed(() => {
+  if (upActive.value > 0) return '上传中'
+  if (upDone.value > 0) return '已备份 ' + upDone.value
+  return '照片 · 文件'
+})
+
+function openDownloads() {
+  uni.navigateTo({ url: '/pages/downloads/downloads' })
+}
+
+function openBackup() {
+  uni.navigateTo({ url: '/pages/backup/backup' })
+}
+
+function confirmLogout() {
+  uni.showModal({
+    title: '退出登录',
+    content: '确定要退出当前 NAS 账号吗？',
+    success: (res) => {
+      if (res.confirm) emit('logout')
+    },
+  })
+}
+
+// ---------------- 检查更新（GitHub Releases）----------------
+
+function checkUpdate() {
+  if (updState.value !== 'idle') return
+  updState.value = 'checking'
+  const cur = currentVersion()
+  fetchLatestRelease()
+    .then((rel: AppRelease) => {
+      updState.value = 'idle'
+      if (compareVersion(rel.version, cur) <= 0) {
+        updLatest.value = ''
+        uni.showModal({
+          title: '已是最新版本',
+          content: '当前版本 v' + cur + '，已是最新。',
+          showCancel: false,
+        })
+        return
+      }
+      updLatest.value = rel.version
+      let content = '最新版本 v' + rel.version + '，当前 v' + cur + '。'
+      if (rel.notes.length > 0) {
+        content = content + '\n\n' + rel.notes
+      }
+      const hasApk = rel.apkUrl.length > 0
+      if (!hasApk) {
+        content = content + '\n\n该版本未附带安装包，将复制发布页链接。'
+      }
+      uni.showModal({
+        title: '发现新版本',
+        content: content,
+        confirmText: hasApk ? '立即更新' : '复制链接',
+        cancelText: '稍后',
+        success: (r) => {
+          if (r.confirm) doUpdate(rel)
+        },
+      })
+    })
+    .catch((e: any) => {
+      updState.value = 'idle'
+      const msg: string = e?.message ?? '未知错误'
+      uni.showModal({ title: '检查更新失败', content: msg, showCancel: false })
+    })
+}
+
+function doUpdate(rel: AppRelease) {
+  // 没有 apk 资源：复制发布页链接，让用户自行下载
+  if (rel.apkUrl.length === 0) {
+    copyText(rel.pageUrl, '发布页链接已复制，可在浏览器打开下载')
+    return
+  }
+  // #ifdef APP-ANDROID
+  updState.value = 'downloading'
+  updProgress.value = 0
+  downloadApk(rel.apkUrl, (p: number) => {
+    updProgress.value = p
+  })
+    .then((filePath: string) => {
+      updState.value = 'installing'
+      uni.installApk({
+        filePath: filePath,
+        success: () => {
+          updState.value = 'idle'
+          updProgress.value = 0
+        },
+        fail: (err: any) => {
+          updState.value = 'idle'
+          updProgress.value = 0
+          const msg: string = err?.errMsg ?? '未知错误'
+          uni.showModal({
+            title: '安装未启动',
+            content: '安装包已下载完成，但系统未允许安装（' + msg +
+              '）。请在系统设置里允许本应用「安装未知应用」后重试。',
+            showCancel: false,
+          })
+        },
+      })
+    })
+    .catch((e: any) => {
+      updState.value = 'idle'
+      updProgress.value = 0
+      const msg: string = e?.message ?? '未知错误'
+      uni.showModal({ title: '更新失败', content: msg, showCancel: false })
+    })
+  // #endif
+  // #ifndef APP-ANDROID
+  copyText(rel.apkUrl, '安装包链接已复制，可在浏览器下载')
+  // #endif
+}
+
+function copyText(text: string, tip: string) {
+  uni.setClipboardData({
+    data: text,
+    success: () => {
+      uni.showToast({ title: tip, icon: 'none', duration: 2500 })
+    },
+    fail: () => {
+      // 剪贴板不可用（部分平台/H5 无权限）时直接把链接展示出来，便于手动复制
+      uni.showModal({ title: '请手动复制链接', content: text, showCancel: false })
+    },
+  })
+}
+</script>
+
+<style>
+  .set-page {
+    flex: 1;
+  }
+
+  /* ---------- 账号卡 ---------- */
+  .account-card {
+    background-color: #ffffff;
+    border-radius: 12px;
+    margin: 12px 12px 0 12px;
+    padding: 14px;
+    flex-direction: column;
+  }
+  .acc-head {
+    flex-direction: row;
+    align-items: center;
+  }
+  .acc-logo {
+    width: 44px;
+    height: 44px;
+    border-radius: 11px;
+    margin-right: 12px;
+  }
+  .acc-info {
+    flex: 1;
+    flex-direction: column;
+  }
+  .acc-name {
+    font-size: 16px;
+    font-weight: bold;
+    color: #1a1d21;
+  }
+  .acc-addr {
+    font-size: 12px;
+    color: #8a8f99;
+    margin-top: 4px;
+  }
+  .acc-badge {
+    background-color: #e8f6ee;
+    border-radius: 10px;
+    padding: 3px 9px;
+  }
+  .acc-badge-text {
+    font-size: 11px;
+    color: #1a9c5b;
+  }
+  .acc-divider {
+    height: 1px;
+    background-color: #f0f2f5;
+    margin: 12px 0 4px 0;
+  }
+  .acc-meta {
+    flex-direction: row;
+    align-items: center;
+    padding: 5px 0;
+  }
+  .acc-meta-label {
+    width: 76px;
+    font-size: 13px;
+    color: #8a8f99;
+  }
+  .acc-meta-value {
+    flex: 1;
+    font-size: 13px;
+    color: #333333;
+  }
+
+  /* ---------- 分组 ---------- */
+  .group-title {
+    font-size: 12px;
+    color: #8a8f99;
+    margin: 18px 20px 2px 20px;
+  }
+  .card {
+    background-color: #ffffff;
+    border-radius: 12px;
+    margin: 8px 12px 0 12px;
+    padding: 0 14px;
+    flex-direction: column;
+  }
+  .row {
+    flex-direction: row;
+    align-items: center;
+    padding: 14px 0;
+  }
+  .row-line {
+    border-top: 1px solid #f0f2f5;
+  }
+  .row-icon {
+    font-size: 17px;
+    width: 26px;
+    margin-right: 8px;
+  }
+  .row-title {
+    flex: 1;
+    font-size: 15px;
+    color: #1a1d21;
+  }
+  .row-value {
+    font-size: 13px;
+    color: #8a8f99;
+    margin-left: 6px;
+  }
+  .chevron {
+    font-size: 18px;
+    color: #c8ccd4;
+    margin-left: 6px;
+  }
+  .badge {
+    font-size: 11px;
+    color: #ffffff;
+    background-color: #d94838;
+    border-radius: 9px;
+    padding: 1px 6px;
+    margin-left: 6px;
+  }
+
+  /* ---------- 退出 ---------- */
+  .logout-card {
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+    height: 48px;
+  }
+  .logout-text {
+    font-size: 15px;
+    color: #d94838;
+  }
+
+  .footer {
+    font-size: 11px;
+    color: #b0b5bd;
+    text-align: center;
+    width: 100%;
+    margin-top: 22px;
+  }
+  .bottom-space {
+    height: 24px;
+  }
+</style>

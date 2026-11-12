@@ -1,0 +1,79 @@
+<template>
+  <view class="page">
+    <!-- 内容区：用 v-show 保留各 tab 的状态（目录位置、滚动位置、已加载数据） -->
+    <view class="content">
+      <files-view v-show="tab === 0" />
+      <photos-view v-show="tab === 1" />
+      <downloads-view v-show="tab === 2" />
+      <settings-view v-show="tab === 3" @logout="onLogout" />
+    </view>
+
+    <!-- 下载进行中浮条（点击进入下载管理） -->
+    <dl-banner />
+
+    <!-- 自定义底部导航 -->
+    <view class="tabbar">
+      <view v-for="(t, index) in tabs" :key="index" class="tab-item" @click="tab = index">
+        <text class="tab-icon">{{ tab === index ? t.iconActive : t.icon }}</text>
+        <text class="tab-label" :class="tab === index ? 'tab-label-active' : 'tab-label-normal'">{{ t.label }}</text>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { api } from '@/utils/syno.uts'
+
+const tab = ref(0)
+const tabs = [
+  { label: '文件', icon: '📁', iconActive: '📂' },
+  { label: '照片', icon: '🖼️', iconActive: '🖼️' },
+  { label: '下载', icon: '☁️', iconActive: '⬇️' },
+  { label: '设置', icon: '⚙️', iconActive: '⚙️' },
+]
+
+// 未登录则回登录页
+if (!api.loggedIn) {
+  uni.reLaunch({ url: '/pages/login/login' })
+}
+
+function onLogout() {
+  api.clear()
+  uni.reLaunch({ url: '/pages/login/login' })
+}
+</script>
+
+<style>
+  .page {
+    flex: 1;
+    background-color: #f7f8fa;
+  }
+  .content {
+    flex: 1;
+  }
+  .tabbar {
+    height: 56px;
+    flex-direction: row;
+    background-color: #ffffff;
+    border-top: 1px solid #eeeeee;
+  }
+  .tab-item {
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+  }
+  .tab-icon {
+    font-size: 18px;
+  }
+  .tab-label {
+    font-size: 11px;
+    margin-top: 2px;
+  }
+  .tab-label-active {
+    color: #1e6bb8;
+  }
+  .tab-label-normal {
+    color: #999999;
+  }
+</style>

@@ -1,0 +1,172 @@
+// 手机端「文件 / 文件夹」选择封装
+// 依赖内置 UTS 插件 uni_modules/qh-file-picker（仅 Android App 可用）
+// Web / iOS 上所有方法都会以「不支持」拒绝，调用方需自行降级
+
+// #ifdef APP-ANDROID
+import { pickFiles, pickDirectory, exportToCache, clearCache } from '@/uni_modules/qh-file-picker'
+// #endif
+
+/** 手机上的一个文件（content:// 地址） */
+export type DeviceFile = {
+  name: string
+  size: number
+  uri: string
+  /** 相对所选文件夹的路径；直接选文件时等于文件名 */
+  relativePath: string
+}
+
+/** 选中的整个文件夹 */
+export type DeviceDir = {
+  dirName: string
+  files: Array<DeviceFile>
+  totalSize: number
+  /** 是否因超过 maxFiles 被截断 */
+  truncated: boolean
+}
+
+/** 当前平台是否支持（仅 Android App） */
+export function devicePickerSupported(): boolean {
+  // #ifdef APP-ANDROID
+  return true
+  // #endif
+  // #ifndef APP-ANDROID
+  return false
+  // #endif
+}
+
+function toDeviceFile(f: any): DeviceFile {
+  const size = typeof f.size === 'number' ? f.size : 0
+  const name: string = typeof f.name === 'string' ? f.name : ''
+  let rel: string = typeof f.relativePath === 'string' ? f.relativePath : ''
+  if (rel.length == 0) {
+    rel = name
+  }
+  const item: DeviceFile = {
+    name: name,
+    size: size,
+    uri: typeof f.uri === 'string' ? f.uri : '',
+    relativePath: rel,
+  }
+  return item
+}
+
+/** 选择单个/多个文件（系统文件选择器） */
+export function devicePickFiles(count: number, mimeType: string): Promise<Array<DeviceFile>> {
+  return new Promise<Array<DeviceFile>>((resolve, reject) => {
+    // #ifdef APP-ANDROID
+    const opts = {
+      count: count,
+      mimeType: mimeType.length > 0 ? mimeType : '*/*',
+      success: (res: any) => {
+        const list: Array<DeviceFile> = []
+        const raw = res.files as Array<any>
+        for (let i = 0; i < raw.length; i++) {
+          list.push(toDeviceFile(raw[i]))
+        }
+        resolve(list)
+      },
+      fail: (err: any) => {
+        reject(new Error(err.errMsg))
+      },
+    }
+    pickFiles(opts)
+    // #endif
+    // #ifndef APP-ANDROID
+    reject(new Error('当前平台不支持选择文件，请在 Android App 中使用'))
+    // #endif
+  })
+}
+
+/** 选择整个文件夹，并递归扫描其中的文件 */
+export function devicePickDirectory(maxFiles: number): Promise<DeviceDir> {
+  return new Promise<DeviceDir>((resolve, reject) => {
+    // #ifdef APP-ANDROID
+    const opts = {
+      maxFiles: maxFiles,
+      success: (res: any) => {
+        const list: Array<DeviceFile> = []
+        const raw = res.files as Array<any>
+        let total = 0
+        for (let i = 0; i < raw.length; i++) {
+          const f = toDeviceFile(raw[i])
+          total = total + f.size
+          list.push(f)
+        }
+        const dir: DeviceDir = {
+          dirName: typeof res.dirName === 'string' ? res.dirName : '已选文件夹',
+          files: list,
+          totalSize: total,
+          truncated: res.truncated === true,
+        }
+        resolve(dir)
+      },
+      fail: (err: any) => {
+        reject(new Error(err.errMsg))
+      },
+    }
+    pickDirectory(opts)
+    // #endif
+    // #ifndef APP-ANDROID
+    reject(new Error('当前平台不支持选择文件夹，请在 Android App 中使用'))
+    // #endif
+  })
+}
+
+/** 把 content:// 文件导出到应用缓存目录，返回可上传的本地路径 */
+export function deviceExportToCache(uri: string, name: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    // #ifdef APP-ANDROID
+    const opts = {
+      uri: uri,
+      name: name,
+      success: (res: any) => {
+        resolve(res.path as string)
+      },
+      fail: (err: any) => {
+        reject(new Error(err.errMsg))
+      },
+    }
+    exportToCache(opts)
+    // #endif
+    // #ifndef APP-ANDROID
+    reject(new Error('当前平台不支持该操作'))
+    // #endif
+  })
+}
+
+/** 清空导出的临时缓存文件 */
+export function deviceClearCache(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    // #ifdef APP-ANDROID
+    const opts = {
+      success: (res: any) => {
+        resolve(typeof res.removed === 'number' ? res.removed : 0)
+      },
+      fail: (err: any) => {
+        reject(new Error(err.errMsg))
+      },
+    }
+    clearCache(opts)
+    // #endif
+    // #ifndef APP-ANDROID
+    resolve(0)
+    // #endif
+  })
+}
+
+/** 删除上传完成后残留的缓存文件（失败静默） */
+export function deviceRemoveFile(path: string) {
+  if (path.length == 0) {
+    return
+  }
+  try {
+    uni.getFileSystemManager().unlink({
+      filePath: path,
+      fail: () => {
+        // 缓存文件删不掉不影响功能，交给系统清理
+      },
+    })
+  } catch (e) {
+    // 忽略
+  }
+}

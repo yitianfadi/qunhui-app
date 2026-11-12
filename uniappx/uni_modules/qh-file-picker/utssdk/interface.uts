@@ -1,0 +1,113 @@
+/**
+ * qh-file-picker 类型定义
+ * Android 端文件 / 文件夹选择（SAF，Storage Access Framework）
+ */
+
+/** 选中（或扫描到）的单个文件 */
+export type PickedFile = {
+  /** 文件名，如 IMG_0001.jpg */
+  name: string
+  /** 文件字节数，部分 provider 取不到时为 0 */
+  size: number
+  /** content:// URI，可直接交给 exportToCache 导出为本地文件 */
+  uri: string
+  /** 相对所选文件夹的路径，如 sub/a.jpg；选择单个文件时等于 name */
+  relativePath: string
+  /** MIME 类型，如 image/jpeg */
+  mimeType: string
+}
+
+/** pickFiles 成功回调参数 */
+export type PickedFilesResult = {
+  errMsg: string
+  files: Array<PickedFile>
+}
+
+/** pickDirectory 成功回调参数 */
+export type PickedDirResult = {
+  errMsg: string
+  /** 所选文件夹的名称 */
+  dirName: string
+  /** 文件夹的 tree URI（已申请持久读权限） */
+  treeUri: string
+  /** 递归扫描到的全部文件 */
+  files: Array<PickedFile>
+  /** 全部文件合计字节数 */
+  totalSize: number
+  /** 是否因为超过 maxFiles 上限被截断 */
+  truncated: boolean
+}
+
+/** pickFiles 参数 */
+export type PickFilesOptions = {
+  /** 最多可选数量，默认 20 */
+  count?: number
+  /** MIME 过滤，默认 *\/* 表示任意文件 */
+  mimeType?: string
+  success?: (res: PickedFilesResult) => void
+  fail?: (res: UniError) => void
+  complete?: (res: any) => void
+}
+
+/** pickDirectory 参数 */
+export type PickDirectoryOptions = {
+  /** 单次最多扫描的文件数，默认 2000，防止超大目录卡死 */
+  maxFiles?: number
+  success?: (res: PickedDirResult) => void
+  fail?: (res: UniError) => void
+  complete?: (res: any) => void
+}
+
+/** exportToCache 成功回调参数 */
+export type ExportedFile = {
+  errMsg: string
+  /** 导出后的本地绝对路径，可直接用于 uni.uploadFile */
+  path: string
+  size: number
+}
+
+/** exportToCache 参数 */
+export type ExportOptions = {
+  /** pickFiles / pickDirectory 返回的 content:// URI */
+  uri: string
+  /** 保存到缓存目录时使用的文件名 */
+  name: string
+  success?: (res: ExportedFile) => void
+  fail?: (res: UniError) => void
+  complete?: (res: any) => void
+}
+
+/** clearCache 成功回调参数 */
+export type ClearCacheResult = {
+  errMsg: string
+  /** 删除的文件个数 */
+  removed: number
+}
+
+export type ClearCacheOptions = {
+  success?: (res: ClearCacheResult) => void
+  fail?: (res: UniError) => void
+  complete?: (res: any) => void
+}
+
+/** 错误码 */
+export type QhPickerErrorCode =
+  9020001 | // 平台不支持
+  9020002 | // 用户取消
+  9020003 | // 未取到 URI
+  9020004 | // 读取文件失败
+  9020005 | // 无法启动选择器
+  9020006 // 没有权限
+
+export interface QhPickerFail extends IUniError {
+  errCode: QhPickerErrorCode
+}
+
+/** 选择文件（多选） */
+export type PickFiles = (options: PickFilesOptions) => void
+/** 选择文件夹并递归扫描其中的文件 */
+export type PickDirectory = (options: PickDirectoryOptions) => void
+/** 把 content:// 文件导出到应用缓存目录，返回本地路径 */
+export type ExportFile = (options: ExportOptions) => void
+/** 清空导出缓存目录 */
+export type ClearCache = (options: ClearCacheOptions) => void

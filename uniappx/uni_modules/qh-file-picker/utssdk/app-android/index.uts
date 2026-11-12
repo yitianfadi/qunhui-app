@@ -1,0 +1,457 @@
+/**
+ * qh-file-picker —— Android 原生文件 / 文件夹选择器
+ *
+ * 为什么需要它：uni-app x 只提供 uni.chooseImage（相册媒体），没有 chooseFile，
+ * 也没有目录选择 API。这里直接用 Android 的 SAF（Storage Access Framework）实现：
+ *   - pickFiles   → ACTION_OPEN_DOCUMENT（可多选、可指定 MIME）
+ *   - pickDirectory → ACTION_OPEN_DOCUMENT_TREE（选整个文件夹）
+ *   - 目录用 ContentResolver 递归查询（DocumentsContract），拿不到名字时降级
+ *   - exportToCache → 把 content:// 流式拷贝到应用缓存，供 uni.uploadFile 上传
+ */
+import Activity from 'android.app.Activity'
+import ContentResolver from 'android.content.ContentResolver'
+import Intent from 'android.content.Intent'
+import Uri from 'android.net.Uri'
+import DocumentsContract from 'android.provider.DocumentsContract'
+import File from 'java.io.File'
+import FileOutputStream from 'java.io.FileOutputStream'
+import InputStream from 'java.io.InputStream'
+
+import {
+  PickFiles,
+  PickFilesOptions,
+  PickedFile,
+  PickedFilesResult,
+  PickDirectory,
+  PickDirectoryOptions,
+  PickedDirResult,
+  ExportFile,
+  ExportOptions,
+  ExportedFile,
+  ClearCache,
+  ClearCacheOptions,
+  ClearCacheResult
+} from '../interface.uts'
+import { QhPickerFailImpl } from '../unierror'
+
+const REQ_PICK_FILES = 29801
+const REQ_PICK_DIR = 29802
+/** 缓存目录名（应用私有缓存，系统可随时清理） */
+const CACHE_DIR_NAME = 'qh_pick'
+/** DocumentsContract.Document.MIME_TYPE_DIR */
+const MIME_DIR = 'vnd.android.document/directory'
+/** 拷贝缓冲区大小（Kotlin 的 ByteArray 需要 Int，用 toInt() 转换） */
+const BUF_SIZE = 65536
+
+let pendingFiles: PickFilesOptions | null = null
+let pendingDir: PickDirectoryOptions | null = null
+let listenerReady = false
+
+/** 目录遍历节点（避免递归，用栈做 BFS） */
+class DirNode {
+  docId: string = ''
+  relPath: string = ''
+
+  constructor(docId: string, relPath: string) {
+    this.docId = docId
+    this.relPath = relPath
+  }
+}
+
+/** 注册一次 Activity 结果监听（插件内部复用） */
+function ensureListener() {
+  if (listenerReady) {
+    return
+  }
+  listenerReady = true
+  UTSAndroid.onAppActivityResult((requestCode: Int, resultCode: Int, data?: Intent) => {
+    if (requestCode == REQ_PICK_FILES) {
+      handleFilesResult(resultCode, data)
+    } else if (requestCode == REQ_PICK_DIR) {
+      handleDirResult(resultCode, data)
+    }
+  })
+}
+
+/** 查询单个 content uri 的显示名与大小 */
+function queryMeta(resolver: ContentResolver, uri: Uri): PickedFile {
+  let name = ''
+  let size = 0
+  const cursor = resolver.query(uri, null, null, null, null)
+  if (cursor != null) {
+    if (cursor.moveToFirst()) {
+      const nameIdx = cursor.getColumnIndex('_display_name')
+      if (nameIdx >= 0) {
+        const v = cursor.getString(nameIdx)
+        if (v != null) {
+          name = v
+        }
+      }
+      const sizeIdx = cursor.getColumnIndex('_size')
+      if (sizeIdx >= 0) {
+        size = cursor.getLong(sizeIdx)
+      }
+    }
+    cursor.close()
+  }
+  const item: PickedFile = {
+    name: name,
+    size: size,
+    uri: uri.toString(),
+    relativePath: name,
+    mimeType: ''
+  }
+  return item
+}
+
+/** 递归扫描 tree uri 下的全部文件 */
+function collectTree(resolver: ContentResolver, treeUri: Uri, maxFiles: number): Array<PickedFile> {
+  const out: Array<PickedFile> = []
+  const rootId = DocumentsContract.getTreeDocumentId(treeUri)
+  const stack: Array<DirNode> = []
+  stack.push(new DirNode(rootId, ''))
+
+  while (stack.length > 0) {
+    if (out.length >= maxFiles) {
+      break
+    }
+    const node = stack.pop()!
+    const childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, node.docId)
+    const cursor = resolver.query(childrenUri, null, null, null, null)
+    if (cursor == null) {
+      continue
+    }
+    const idIdx = cursor.getColumnIndex('document_id')
+    const nameIdx = cursor.getColumnIndex('_display_name')
+    const mimeIdx = cursor.getColumnIndex('mime_type')
+    const sizeIdx = cursor.getColumnIndex('_size')
+
+    while (cursor.moveToNext()) {
+      if (out.length >= maxFiles) {
+        break
+      }
+      let docId = ''
+      if (idIdx >= 0) {
+        const v = cursor.getString(idIdx)
+        if (v != null) {
+          docId = v
+        }
+      }
+      let name = ''
+      if (nameIdx >= 0) {
+        const v = cursor.getString(nameIdx)
+        if (v != null) {
+          name = v
+        }
+      }
+      let mime = ''
+      if (mimeIdx >= 0) {
+        const v = cursor.getString(mimeIdx)
+        if (v != null) {
+          mime = v
+        }
+      }
+      if (docId.length == 0 || name.length == 0) {
+        continue
+      }
+      const relPath = node.relPath.length == 0 ? name : node.relPath + '/' + name
+      if (mime == MIME_DIR) {
+        stack.push(new DirNode(docId, relPath))
+      } else {
+        let size = 0
+        if (sizeIdx >= 0) {
+          size = cursor.getLong(sizeIdx)
+        }
+        const docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+        const item: PickedFile = {
+          name: name,
+          size: size,
+          uri: docUri.toString(),
+          relativePath: relPath,
+          mimeType: mime
+        }
+        out.push(item)
+      }
+    }
+    cursor.close()
+  }
+  return out
+}
+
+function finishFiles(options: PickFilesOptions, files: Array<PickedFile>) {
+  const res: PickedFilesResult = {
+    errMsg: 'pickFiles:ok',
+    files: files
+  }
+  options.success?.(res)
+  options.complete?.(res)
+}
+
+function failFiles(options: PickFilesOptions, err: UniError) {
+  options.fail?.(err)
+  options.complete?.(err)
+}
+
+function finishDir(options: PickDirectoryOptions, dirName: string, treeUri: string,
+  files: Array<PickedFile>, totalSize: number, truncated: boolean) {
+  const res: PickedDirResult = {
+    errMsg: 'pickDirectory:ok',
+    dirName: dirName,
+    treeUri: treeUri,
+    files: files,
+    totalSize: totalSize,
+    truncated: truncated
+  }
+  options.success?.(res)
+  options.complete?.(res)
+}
+
+function failDir(options: PickDirectoryOptions, err: UniError) {
+  options.fail?.(err)
+  options.complete?.(err)
+}
+
+/** 处理「选择文件」返回 */
+function handleFilesResult(resultCode: Int, data?: Intent) {
+  const options = pendingFiles
+  pendingFiles = null
+  if (options == null) {
+    return
+  }
+  if (resultCode != Activity.RESULT_OK) {
+    failFiles(options, new QhPickerFailImpl(9020002))
+    return
+  }
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null || data == null) {
+    failFiles(options, new QhPickerFailImpl(9020003))
+    return
+  }
+  const resolver = ctx.getContentResolver()
+  const files: Array<PickedFile> = []
+
+  const clip = data.getClipData()
+  if (clip != null) {
+    for (let i = 0; i < clip.getItemCount(); i++) {
+      const item = clip.getItemAt(i.toInt())
+      const u = item.getUri()
+      if (u != null) {
+        files.push(queryMeta(resolver, u))
+      }
+    }
+  }
+  if (files.length == 0) {
+    const single = data.getData()
+    if (single != null) {
+      files.push(queryMeta(resolver, single))
+    }
+  }
+  if (files.length == 0) {
+    failFiles(options, new QhPickerFailImpl(9020003))
+    return
+  }
+  finishFiles(options, files)
+}
+
+/** 处理「选择文件夹」返回 */
+function handleDirResult(resultCode: Int, data?: Intent) {
+  const options = pendingDir
+  pendingDir = null
+  if (options == null) {
+    return
+  }
+  if (resultCode != Activity.RESULT_OK) {
+    failDir(options, new QhPickerFailImpl(9020002))
+    return
+  }
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null || data == null) {
+    failDir(options, new QhPickerFailImpl(9020003))
+    return
+  }
+  const treeUri = data.getData()
+  if (treeUri == null) {
+    failDir(options, new QhPickerFailImpl(9020003))
+    return
+  }
+  const resolver = ctx.getContentResolver()
+  // 申请持久读权限，后续导出文件时仍可用
+  try {
+    resolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION.toInt())
+  } catch (e) {
+    // 部分 provider 不支持持久授权，忽略即可（本次会话内仍可读）
+  }
+
+  const maxFiles = options.maxFiles == null ? 2000 : options.maxFiles!
+  const files = collectTree(resolver, treeUri, maxFiles)
+  let total = 0
+  for (let i = 0; i < files.length; i++) {
+    total = total + files[i].size
+  }
+  const truncated = files.length >= maxFiles
+
+  // 取文件夹名
+  let dirName = ''
+  try {
+    const rootId = DocumentsContract.getTreeDocumentId(treeUri)
+    const rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId)
+    dirName = queryMeta(resolver, rootUri).name
+  } catch (e) {
+    dirName = ''
+  }
+  if (dirName.length == 0) {
+    dirName = '已选文件夹'
+  }
+  finishDir(options, dirName, treeUri.toString(), files, total, truncated)
+}
+
+/** 选择文件（多选） */
+export const pickFiles: PickFiles = function (options: PickFilesOptions) {
+  const activity = UTSAndroid.getUniActivity()
+  if (activity == null) {
+    failFiles(options, new QhPickerFailImpl(9020005))
+    return
+  }
+  ensureListener()
+  pendingFiles = options
+  const count = options.count == null ? 20 : options.count!
+  const mime = options.mimeType == null ? '*/*' : options.mimeType!
+  const intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+  intent.addCategory(Intent.CATEGORY_OPENABLE)
+  intent.setType(mime)
+  intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, count > 1)
+  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION.toInt())
+  try {
+    activity.startActivityForResult(intent, REQ_PICK_FILES.toInt())
+  } catch (e) {
+    pendingFiles = null
+    failFiles(options, new QhPickerFailImpl(9020005))
+  }
+}
+
+/** 选择文件夹（递归返回其中全部文件） */
+export const pickDirectory: PickDirectory = function (options: PickDirectoryOptions) {
+  const activity = UTSAndroid.getUniActivity()
+  if (activity == null) {
+    failDir(options, new QhPickerFailImpl(9020005))
+    return
+  }
+  ensureListener()
+  pendingDir = options
+  const intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION.toInt())
+  try {
+    activity.startActivityForResult(intent, REQ_PICK_DIR.toInt())
+  } catch (e) {
+    pendingDir = null
+    failDir(options, new QhPickerFailImpl(9020005))
+  }
+}
+
+/** 文件名安全化：去掉路径分隔符等非法字符 */
+function safeName(name: string): string {
+  let out = ''
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charAt(i.toInt())
+    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
+      out = out + '_'
+    } else {
+      out = out + c
+    }
+  }
+  if (out.length == 0) {
+    out = 'file_' + Date.now()
+  }
+  return out
+}
+
+/** 把 content:// 文件流式导出到应用缓存目录 */
+export const exportToCache: ExportFile = function (options: ExportOptions) {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) {
+    const err = new QhPickerFailImpl(9020004)
+    options.fail?.(err)
+    options.complete?.(err)
+    return
+  }
+  let input: InputStream | null = null
+  let output: FileOutputStream | null = null
+  try {
+    input = ctx.getContentResolver().openInputStream(Uri.parse(options.uri))
+    if (input == null) {
+      const err = new QhPickerFailImpl(9020006)
+      options.fail?.(err)
+      options.complete?.(err)
+      return
+    }
+    const dir = new File(ctx.getCacheDir(), CACHE_DIR_NAME)
+    if (!dir.exists()) {
+      dir.mkdirs()
+    }
+    const outFile = new File(dir, safeName(options.name))
+    output = new FileOutputStream(outFile)
+    const buf = new ByteArray(BUF_SIZE.toInt())
+    let len = input!.read(buf)
+    while (len > 0) {
+      output!.write(buf, 0, len.toInt())
+      len = input!.read(buf)
+    }
+    output!.flush()
+    output!.close()
+    input!.close()
+
+    const res: ExportedFile = {
+      errMsg: 'exportToCache:ok',
+      path: outFile.getAbsolutePath(),
+      size: outFile.length()
+    }
+    options.success?.(res)
+    options.complete?.(res)
+  } catch (e) {
+    try {
+      if (output != null) {
+        output!.close()
+      }
+      if (input != null) {
+        input!.close()
+      }
+    } catch (e2) {
+      // 忽略关闭异常
+    }
+    const err = new QhPickerFailImpl(9020004)
+    options.fail?.(err)
+    options.complete?.(err)
+  }
+}
+
+/** 清空导出缓存目录 */
+export const clearCache: ClearCache = function (options: ClearCacheOptions) {
+  let removed = 0
+  try {
+    const ctx = UTSAndroid.getAppContext()
+    if (ctx != null) {
+      const dir = new File(ctx.getCacheDir(), CACHE_DIR_NAME)
+      if (dir.exists()) {
+        const nativeChildren = dir.listFiles()
+        if (nativeChildren != null) {
+          const children = Array.fromNative(nativeChildren)
+          for (let i = 0; i < children.length; i++) {
+            if (children[i].delete()) {
+              removed = removed + 1
+            }
+          }
+        }
+      }
+    }
+    const res: ClearCacheResult = {
+      errMsg: 'clearCache:ok',
+      removed: removed
+    }
+    options.success?.(res)
+    options.complete?.(res)
+  } catch (e) {
+    const err = new QhPickerFailImpl(9020004)
+    options.fail?.(err)
+    options.complete?.(err)
+  }
+}

@@ -1,0 +1,61 @@
+{
+	"name": "群晖助手",
+	"appid": "__UNI__BCED876",
+	"description": "群晖 DSM 客户端：文件管理、照片相册、下载管理",
+	"versionName": "1.0.1",
+	"versionCode": "101",
+	"uni-app-x": {
+		"vapor": true,
+		"vapor-render-target": "bytecode",
+		"styleIsolationVersion": "2",
+		"vapor-default-script-lang": "ts"
+	},
+	"vueVersion": "3",
+	"locale": "zh-Hans",
+	"web": {
+		"uniStatistics": {
+			"enable": false
+		},
+		"router": {
+			"mode": "hash"
+		}
+	},
+	"app": {
+		"distribute": {
+			"android": {
+				"packagename": "cn.zy.qunhui"
+			}
+		}
+	},
+	"app-android": {
+		"splashScreen": {
+			"autoClose": "onReady"
+		},
+		"distribute": {
+			"packagename": "cn.zy.qunhui",
+			"minSdkVersion": 26,
+			"targetSdkVersion": 35,
+			"abiFilters": [
+				"arm64-v8a",
+				"armeabi-v7a"
+			],
+			"icons": {
+				"hdpi": "static/logo_72.png",
+				"xhdpi": "static/logo_96.png",
+				"xxhdpi": "static/logo_144.png",
+				"xxxhdpi": "static/logo_192.png"
+			},
+			"permissions": [
+				"<uses-permission android:name=\"android.permission.INTERNET\"/>",
+				"<uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\"/>"
+			]
+		}
+	},
+	"app-ios": {
+		"distribute": {
+			"modules": {},
+			"icons": {},
+			"splashScreens": {}
+		}
+	}
+}

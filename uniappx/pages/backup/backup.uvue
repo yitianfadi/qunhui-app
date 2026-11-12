@@ -1,0 +1,798 @@
+<template>
+  <view class="backup-page">
+    <!-- 顶部切换 -->
+    <view class="seg-bar">
+      <text class="seg-item" :class="mode === 'up' ? 'seg-active' : ''" @click="switchMode('up')">上传备份</text>
+      <text class="seg-item" :class="mode === 'down' ? 'seg-active' : ''" @click="switchMode('down')">下载备份</text>
+    </view>
+
+    <!-- ============ 上传：手机 → NAS ============ -->
+    <scroll-view v-if="mode === 'up'" class="body" direction="vertical">
+      <view class="up-wrap">
+        <view class="card">
+          <text class="card-title">备份到 NAS 目录</text>
+          <view class="path-row">
+            <input class="path-input" v-model="destFolder" placeholder="/home 或 /photo" />
+            <text class="path-pick" @click="openPicker('dest')">选择</text>
+          </view>
+          <text class="hint">点「选择」浏览 NAS 上已存在的共享文件夹（如 /home、/photo）。共享文件夹本身不能自动创建（子目录可以），同名文件将覆盖。</text>
+        </view>
+
+        <view class="action-card" @click="pickPhotos">
+          <text class="action-icon">📷</text>
+          <view class="action-info">
+            <text class="action-title">备份手机照片 / 视频</text>
+            <text class="action-sub">从相册多选，逐个上传到上面的目标目录</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="action-card" @click="pickFolderUp">
+          <text class="action-icon">📁</text>
+          <view class="action-info">
+            <text class="action-title">备份手机文件夹（含子目录）</text>
+            <text class="action-sub">选择整个目录递归上传，NAS 上保留原有目录结构</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="action-card" @click="pickAnyFiles">
+          <text class="action-icon">📄</text>
+          <view class="action-info">
+            <text class="action-title">选择任意文件上传</text>
+            <text class="action-sub">PDF / Word / 压缩包等，可多选</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="note-card">
+          <text class="note-text">
+            前两项使用系统文件选择器，需在 Android App 中使用（Web 预览不支持）；上传前会把文件临时导出到应用缓存，传完自动清理。
+          </text>
+        </view>
+
+        <!-- 上传队列 -->
+        <view v-if="upTasks.length > 0" class="queue-head">
+          <text class="queue-title">上传队列 {{ upTasks.length }}</text>
+          <text class="queue-clear" @click="cancelUpAll">全部取消</text>
+          <text class="queue-clear queue-clear-gap" @click="clearUp">清空已结束</text>
+        </view>
+        <view v-if="upTasks.length > recentUp.length" class="queue-note">
+          <text class="queue-note-text">任务较多，仅显示最近 {{ recentUp.length }} 条；其余会按顺序继续上传</text>
+        </view>
+
+        <view v-for="(t, index) in recentUp" :key="t.id" class="task">
+          <view class="task-head">
+            <text class="task-icon">📤</text>
+            <view class="task-main">
+              <text class="task-name" max-lines="1">{{ t.name }}</text>
+              <text class="task-meta">{{ t.timeText }} · {{ upStatusText(t) }}</text>
+            </view>
+            <text v-if="isUpActive(t) === true" class="task-act task-act-danger" @click="cancelUp(t.id)">取消</text>
+            <text v-else class="task-act task-act-primary" @click="retryUp(t.id)">重试</text>
+          </view>
+          <view v-if="t.status === 'uploading'" class="bar">
+            <view class="bar-in" :style="'width:' + t.percent + '%'" />
+          </view>
+          <view class="task-foot">
+            <text v-if="t.status === 'failed'" class="task-err" max-lines="1">{{ t.error }}</text>
+            <text v-else class="task-size">{{ t.sizeText }}</text>
+            <text class="task-del" @click="removeUp(t.id)">删除记录</text>
+          </view>
+        </view>
+
+        <view v-if="upTasks.length === 0" class="empty-box">
+          <text class="empty-icon">📤</text>
+          <text class="empty-title">还没有上传任务</text>
+          <text class="empty-hint">选择手机相册里的照片或视频，即可备份到 NAS</text>
+        </view>
+      </view>
+      <view class="bottom-space" />
+    </scroll-view>
+
+    <scroll-view v-else class="body" direction="vertical">
+      <!-- 下载：NAS → 手机 -->
+      <view class="down-wrap">
+        <view class="card">
+          <text class="card-title">选择要备份的文件夹</text>
+          <view class="path-row" @click="openPicker('src')">
+            <text class="path-value" max-lines="1">{{ srcFolder }}</text>
+            <text class="path-pick">选择</text>
+            <text class="chevron">›</text>
+          </view>
+          <view class="run-btn" :class="busy ? 'run-btn-off' : ''" @click="doBackupFolder">
+            <text class="run-btn-text">{{ busy ? '处理中…' : '备份此文件夹到本机' }}</text>
+          </view>
+          <text v-if="busyText.length > 0" class="busy-text">{{ busyText }}</text>
+        </view>
+
+        <view class="action-card" @click="doBackupPhotos(false)">
+          <text class="action-icon">🖼️</text>
+          <view class="action-info">
+            <text class="action-title">备份全部照片（个人空间）</text>
+            <text class="action-sub">按时间线拉取，加入下载队列</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="action-card" @click="doBackupPhotos(true)">
+          <text class="action-icon">🖼️</text>
+          <view class="action-info">
+            <text class="action-title">备份全部照片（共享空间）</text>
+            <text class="action-sub">团队成员共享的照片</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="note-card">
+          <text class="note-text">文件数量不限制，选中后按队列逐个上传；每个文件只在轮到它时才复制一份临时副本到手机缓存，传完即删，不会一次占满存储。可随时取消单个任务或全部取消。</text>
+        </view>
+
+        <!-- 最近下载任务 -->
+        <view class="queue-head">
+          <text class="queue-title">下载队列 {{ dlTasks.length }}</text>
+          <text class="queue-clear" @click="openDownloadPage">查看全部 ›</text>
+        </view>
+
+        <view v-for="(t, index) in recentDl" :key="t.id" class="task">
+          <view class="task-head">
+            <text class="task-icon">📥</text>
+            <view class="task-main">
+              <text class="task-name" max-lines="1">{{ t.name }}</text>
+              <text class="task-meta">{{ t.timeText }} · {{ dlStatusText(t) }}</text>
+            </view>
+          </view>
+          <view v-if="t.status === 'downloading'" class="bar">
+            <view class="bar-in" :style="'width:' + t.percent + '%'" />
+          </view>
+        </view>
+
+        <view v-if="dlTasks.length === 0" class="empty-box">
+          <text class="empty-icon">📥</text>
+          <text class="empty-title">还没有下载任务</text>
+          <text class="empty-hint">选择文件夹或照片空间开始备份</text>
+        </view>
+      </view>
+      <view class="bottom-space" />
+    </scroll-view>
+
+    <!-- 文件夹选择器（按需挂载，避免根节点条件渲染） -->
+    <folder-picker
+      v-if="pickerFor.length > 0"
+      :title="pickerTitle"
+      @select="onPicked"
+      @close="pickerFor = ''"
+    />
+  </view>
+</template>
+
+<script setup>
+import { ref, computed, watch } from 'vue'
+import { upTaskList, startUpload, startUploadsBatch, cancelUpTask, removeUpTask, clearFinishedUpTasks, retryUpTask, cancelAllUpTasks, UpTask, UploadRequest } from '@/utils/upload_manager.uts'
+import { dlTaskList, DlTask } from '@/utils/download_manager.uts'
+import { backupFolder, backupPhotos } from '@/utils/backup_helper.uts'
+import { formatSize } from '@/utils/syno.uts'
+import { devicePickerSupported, devicePickDirectory, devicePickFiles, deviceClearCache, DeviceDir, DeviceFile } from '@/utils/device_picker.uts'
+
+const maxPick = 100000
+
+const mode = ref('up')
+
+// 记住上次使用的目录
+let initialDest = '/home'
+let initialSrc = '/photo'
+try {
+  const d = uni.getStorageSync('backup_dest')
+  if (typeof d === 'string' && (d as string).length > 0) initialDest = d as string
+  const s = uni.getStorageSync('backup_src')
+  if (typeof s === 'string' && (s as string).length > 0) initialSrc = s as string
+} catch (e) {
+  // 忽略存储异常
+}
+
+// 历史默认值是 /backup —— 该共享文件夹在 DSM 上并不存在（上传会报 408），自动纠正
+if (initialDest === '/backup') {
+  initialDest = '/home'
+}
+
+const destFolder = ref(initialDest)
+const srcFolder = ref(initialSrc)
+const busy = ref(false)
+const busyText = ref('')
+
+// 文件夹选择器：''=关闭 / dest=选备份目标 / src=选要备份的源文件夹
+const pickerFor = ref('')
+const pickerTitle = computed(() =>
+  pickerFor.value === 'dest' ? '选择备份目标文件夹' : '选择要备份的文件夹'
+)
+
+function openPicker(which: string) {
+  pickerFor.value = which
+}
+
+function onPicked(path: string) {
+  if (pickerFor.value === 'dest') {
+    destFolder.value = path
+  } else {
+    srcFolder.value = path
+  }
+  pickerFor.value = ''
+  savePaths()
+}
+
+function savePaths() {
+  try {
+    uni.setStorageSync('backup_dest', destFolder.value)
+    uni.setStorageSync('backup_src', srcFolder.value)
+  } catch (e) {
+    // 忽略存储异常
+  }
+}
+
+// 用本地 ref 镜像队列：避免模板对「导入 ref 的局部别名」解包差异（App 端更稳）
+const upTasks = ref<Array<UpTask>>([])
+// 大批量任务时只渲染最近的若干条，避免上千行同时渲染卡住列表
+const RENDER_LIMIT = 120
+const recentUp = ref<Array<UpTask>>([])
+const dlTasks = ref<Array<DlTask>>([])
+// 只展示最近的 6 条下载任务
+const recentDl = ref<Array<DlTask>>([])
+
+watch(
+  upTaskList,
+  (v: Array<UpTask>) => {
+    upTasks.value = v
+    recentUp.value = v.slice(0, RENDER_LIMIT)
+  },
+  { immediate: true }
+)
+
+watch(
+  dlTaskList,
+  (v: Array<DlTask>) => {
+    dlTasks.value = v
+    recentDl.value = v.slice(0, 6)
+  },
+  { immediate: true }
+)
+
+function switchMode(m: string) {
+  mode.value = m
+}
+
+function isUpActive(t: UpTask): boolean {
+  return t.status === 'waiting' || t.status === 'uploading'
+}
+
+function upStatusText(t: UpTask): string {
+  if (t.status === 'waiting') return '等待中'
+  if (t.status === 'uploading') return '上传中 ' + t.percent + '%'
+  if (t.status === 'done') return '已完成'
+  if (t.status === 'canceled') return '已取消'
+  return '上传失败'
+}
+
+function dlStatusText(t: DlTask): string {
+  if (t.status === 'waiting') return '等待中'
+  if (t.status === 'downloading') return '下载中 ' + t.percent + '%'
+  if (t.status === 'done') return '已完成'
+  if (t.status === 'canceled') return '已取消'
+  return '下载失败'
+}
+
+/** 从本地路径推断文件名；App 端可能拿到 content:// 或无扩展名，此时用时间戳命名 */
+function fileNameFromPath(p: string, idx: number): string {
+  let name = ''
+  const parts = p.split('/')
+  if (parts.length > 0) name = parts[parts.length - 1]
+  const qi = name.indexOf('?')
+  if (qi > 0) name = name.slice(0, qi)
+  if (name.length === 0 || name.indexOf('.') < 0 || name.startsWith('image:')) {
+    const d = new Date()
+    name = 'IMG_' + d.getTime() + '_' + idx + '.jpg'
+  }
+  return name
+}
+
+function pickPhotos() {
+  const dest = destFolder.value.trim().length > 0 ? destFolder.value.trim() : '/home'
+  destFolder.value = dest
+  savePaths()
+  uni.chooseImage({
+    count: 50,
+    sizeType: ['original'],
+    sourceType: ['album', 'camera'],
+    success: (res) => {
+      const paths = res.tempFilePaths
+      for (let i = 0; i < paths.length; i++) {
+        startUpload(paths[i], fileNameFromPath(paths[i], i), dest)
+      }
+      uni.showToast({ title: '已加入 ' + paths.length + ' 项', icon: 'none' })
+    },
+    fail: (err) => {
+      if (err.errCode !== 1101001) {
+        uni.showToast({ title: '选择失败：' + err.errMsg, icon: 'none' })
+      }
+    },
+  })
+}
+
+// ---------- 手机端文件夹 / 任意文件上传（UTS 原生插件 qh-file-picker） ----------
+
+function baseName(p: string): string {
+  const i = p.lastIndexOf('/')
+  return i >= 0 ? p.substring(i + 1) : p
+}
+
+function dirOf(p: string): string {
+  const i = p.lastIndexOf('/')
+  return i > 0 ? p.substring(0, i) : ''
+}
+
+function joinFolder(base: string, sub: string): string {
+  let b = base
+  while (b.length > 1 && b.charAt(b.length - 1) === '/') {
+    b = b.substring(0, b.length - 1)
+  }
+  if (sub.length === 0) {
+    return b
+  }
+  return b + '/' + sub
+}
+
+function normalizeDest(): string {
+  const dest = destFolder.value.trim().length > 0 ? destFolder.value.trim() : '/home'
+  destFolder.value = dest
+  savePaths()
+  return dest
+}
+
+function unsupportedTip() {
+  uni.showModal({
+    title: '需要 Android App',
+    content: '系统文件选择器只在 Android App 中可用。Web 预览请用「备份手机照片 / 视频」，或改用下载备份。',
+    showCancel: false,
+  })
+}
+
+function pickFolderUp() {
+  if (!devicePickerSupported()) {
+    unsupportedTip()
+    return
+  }
+  const dest = normalizeDest()
+  // 清掉上一批残留的临时文件
+  deviceClearCache()
+  uni.showLoading({ title: '打开文件夹…', mask: true })
+  devicePickDirectory(maxPick)
+    .then((dir: DeviceDir) => {
+      uni.hideLoading()
+      if (dir.files.length === 0) {
+        uni.showToast({ title: '该文件夹内没有文件', icon: 'none' })
+        return
+      }
+      const tip = dir.truncated ? '\n超过单次上限 ' + maxPick + ' 个，已截断' : ''
+      uni.showModal({
+        title: '确认上传',
+        content: '文件夹：' + dir.dirName + '\n文件数：' + dir.files.length + ' 个\n合计：' + formatSize(dir.totalSize) + tip,
+        confirmText: '开始上传',
+        cancelText: '取消',
+        success: (r) => {
+          if (!r.confirm) {
+            return
+          }
+          enqueueFolder(dir, dest)
+        },
+      })
+    })
+    .catch((e: any) => {
+      uni.hideLoading()
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg.indexOf('已取消') < 0) {
+        uni.showToast({ title: msg, icon: 'none' })
+      }
+    })
+}
+
+function enqueueFolder(dir: DeviceDir, dest: string) {
+  // 一次性批量入队（几千个文件时避免逐条插入的开销）
+  const reqs: Array<UploadRequest> = []
+  for (let i = 0; i < dir.files.length; i++) {
+    const f = dir.files[i]
+    const name = baseName(f.relativePath)
+    if (name.length === 0) {
+      continue
+    }
+    const req: UploadRequest = {
+      localPath: '',
+      contentUri: f.uri,
+      name: name,
+      destFolder: joinFolder(dest, dirOf(f.relativePath)),
+    }
+    reqs.push(req)
+  }
+  const n = startUploadsBatch(reqs)
+  uni.showToast({ title: '已加入 ' + n + ' 个文件，开始排队上传', icon: 'none' })
+}
+
+function pickAnyFiles() {
+  if (!devicePickerSupported()) {
+    unsupportedTip()
+    return
+  }
+  const dest = normalizeDest()
+  uni.showLoading({ title: '打开文件选择器…', mask: true })
+  devicePickFiles(20, '*/*')
+    .then((files: Array<DeviceFile>) => {
+      uni.hideLoading()
+      if (files.length === 0) {
+        return
+      }
+      const reqs: Array<UploadRequest> = []
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i]
+        if (f.name.length === 0) {
+          continue
+        }
+        const req: UploadRequest = {
+          localPath: '',
+          contentUri: f.uri,
+          name: f.name,
+          destFolder: dest,
+        }
+        reqs.push(req)
+      }
+      const n = startUploadsBatch(reqs)
+      uni.showToast({ title: '已加入 ' + n + ' 个文件，开始排队上传', icon: 'none' })
+    })
+    .catch((e: any) => {
+      uni.hideLoading()
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg.indexOf('已取消') < 0) {
+        uni.showToast({ title: msg, icon: 'none' })
+      }
+    })
+}
+
+function cancelUp(id: string) {
+  cancelUpTask(id)
+}
+
+function retryUp(id: string) {
+  retryUpTask(id)
+}
+
+function removeUp(id: string) {
+  removeUpTask(id)
+}
+
+function clearUp() {
+  clearFinishedUpTasks()
+  uni.showToast({ title: '已清理结束的任务', icon: 'none' })
+}
+
+/** 取消全部进行中/排队中的上传 */
+function cancelUpAll() {
+  const n = cancelAllUpTasks()
+  uni.showToast({
+    title: n > 0 ? '已取消 ' + n + ' 个任务' : '没有进行中的任务',
+    icon: 'none',
+  })
+}
+
+async function doBackupFolder() {
+  if (busy.value) return
+  const p = srcFolder.value.trim()
+  if (p.length === 0) {
+    uni.showToast({ title: '请输入 NAS 文件夹路径', icon: 'none' })
+    return
+  }
+  busy.value = true
+  busyText.value = '正在扫描目录…'
+  savePaths()
+  try {
+    const r = await backupFolder(p, maxPick, (text) => {
+      busyText.value = text
+    })
+    busyText.value = ''
+    uni.showToast({ title: '已加入 ' + r.files + ' 个文件', icon: 'none' })
+    if (r.truncated) {
+      uni.showModal({
+        title: '已达单次上限',
+        content: '单次最多备份 ' + maxPick + ' 个文件，剩余文件请分批备份。',
+        showCancel: false,
+      })
+    }
+  } catch (e) {
+    busyText.value = ''
+    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+  } finally {
+    busy.value = false
+  }
+}
+
+async function doBackupPhotos(shared: boolean) {
+  if (busy.value) return
+  busy.value = true
+  busyText.value = '正在读取照片列表…'
+  try {
+    const r = await backupPhotos(shared, maxPick, (text) => {
+      busyText.value = text
+    })
+    busyText.value = ''
+    if (r.files === 0) {
+      uni.showToast({ title: '该空间没有可备份的照片', icon: 'none' })
+    } else {
+      uni.showToast({ title: '已加入 ' + r.files + ' 张照片', icon: 'none' })
+    }
+    if (r.truncated) {
+      uni.showModal({
+        title: '已达单次上限',
+        content: '单次最多备份 ' + maxPick + ' 个文件，剩余照片请分批备份。',
+        showCancel: false,
+      })
+    }
+  } catch (e) {
+    busyText.value = ''
+    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+  } finally {
+    busy.value = false
+  }
+}
+
+function openDownloadPage() {
+  uni.navigateTo({ url: '/pages/downloads/downloads' })
+}
+</script>
+
+<style>
+  .backup-page {
+    flex: 1;
+    background-color: #f7f8fa;
+  }
+  .seg-bar {
+    flex-direction: row;
+    justify-content: center;
+    padding: 10px 0;
+    background-color: #ffffff;
+    border-bottom: 1px solid #eef1f5;
+  }
+  .seg-item {
+    font-size: 14px;
+    color: #666666;
+    padding: 6px 26px;
+    margin: 0 8px;
+    border-radius: 16px;
+  }
+  .seg-active {
+    color: #ffffff;
+    background-color: #1e6bb8;
+  }
+  .body {
+    flex: 1;
+  }
+  .up-wrap {
+    flex-direction: column;
+  }
+  .down-wrap {
+    flex-direction: column;
+  }
+  .card {
+    background-color: #ffffff;
+    border-radius: 12px;
+    margin: 12px 12px 0 12px;
+    padding: 14px;
+    flex-direction: column;
+  }
+  .card-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #1a1d21;
+    margin-bottom: 10px;
+  }
+  .path-row {
+    flex-direction: row;
+    align-items: center;
+    height: 40px;
+    background-color: #f5f7fa;
+    border-radius: 8px;
+    padding: 0 12px;
+  }
+  .path-input {
+    flex: 1;
+    height: 40px;
+    font-size: 14px;
+    color: #1a1d21;
+  }
+  .path-value {
+    flex: 1;
+    font-size: 14px;
+    color: #1a1d21;
+  }
+  .path-pick {
+    font-size: 13px;
+    color: #1e6bb8;
+    padding: 4px 0 4px 10px;
+  }
+  .hint {
+    font-size: 11px;
+    color: #9aa0a8;
+    margin-top: 10px;
+  }
+  .action-card {
+    background-color: #ffffff;
+    border-radius: 12px;
+    margin: 10px 12px 0 12px;
+    padding: 14px;
+    flex-direction: row;
+    align-items: center;
+  }
+  .action-icon {
+    font-size: 22px;
+    margin-right: 12px;
+  }
+  .action-info {
+    flex: 1;
+    flex-direction: column;
+  }
+  .action-title {
+    font-size: 15px;
+    color: #1a1d21;
+  }
+  .action-sub {
+    font-size: 12px;
+    color: #8a8f99;
+    margin-top: 3px;
+  }
+  .chevron {
+    font-size: 18px;
+    color: #c8ccd4;
+  }
+  .note-card {
+    margin: 10px 16px 0 16px;
+  }
+  .note-text {
+    font-size: 11px;
+    color: #9aa0a8;
+    line-height: 17px;
+  }
+  .run-btn {
+    height: 42px;
+    border-radius: 8px;
+    background-color: #1e6bb8;
+    margin-top: 12px;
+    align-items: center;
+    justify-content: center;
+  }
+  .run-btn-off {
+    background-color: #a9c4de;
+  }
+  .run-btn-text {
+    font-size: 14px;
+    color: #ffffff;
+  }
+  .busy-text {
+    font-size: 12px;
+    color: #1e6bb8;
+    margin-top: 8px;
+  }
+  .queue-head {
+    flex-direction: row;
+    align-items: center;
+    margin: 18px 16px 0 16px;
+  }
+  .queue-title {
+    flex: 1;
+    font-size: 12px;
+    color: #8a8f99;
+  }
+  .queue-clear {
+    font-size: 12px;
+    color: #1e6bb8;
+    padding: 2px 0 2px 10px;
+  }
+  .queue-clear-gap {
+    margin-left: 4px;
+  }
+  .queue-note {
+    margin: 6px 16px 0 16px;
+  }
+  .queue-note-text {
+    font-size: 11px;
+    color: #9aa0a8;
+    line-height: 16px;
+  }
+  .task {
+    background-color: #ffffff;
+    border-radius: 10px;
+    margin: 8px 12px 0 12px;
+    padding: 12px 14px 13px 14px;
+    flex-direction: column;
+  }
+  .task-head {
+    flex-direction: row;
+    align-items: center;
+  }
+  .task-icon {
+    font-size: 22px;
+    margin-right: 10px;
+  }
+  .task-main {
+    flex: 1;
+    flex-direction: column;
+  }
+  .task-name {
+    font-size: 14px;
+    color: #222222;
+  }
+  .task-meta {
+    font-size: 12px;
+    color: #8a8f99;
+    margin-top: 3px;
+  }
+  .task-act {
+    font-size: 13px;
+    padding: 6px 8px;
+  }
+  .task-act-primary {
+    color: #1e6bb8;
+  }
+  .task-act-danger {
+    color: #d94838;
+  }
+  .bar {
+    height: 6px;
+    border-radius: 3px;
+    background-color: #eef1f5;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+  .bar-in {
+    height: 6px;
+    border-radius: 3px;
+    background-color: #1e6bb8;
+  }
+  .task-foot {
+    flex-direction: row;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .task-size {
+    flex: 1;
+    font-size: 12px;
+    color: #8a8f99;
+  }
+  .task-err {
+    flex: 1;
+    font-size: 12px;
+    color: #d94838;
+  }
+  .task-del {
+    font-size: 12px;
+    color: #b0b5bd;
+    padding: 4px 0 4px 12px;
+  }
+  .empty-box {
+    padding: 40px 32px;
+    align-items: center;
+  }
+  .empty-icon {
+    font-size: 40px;
+    margin-bottom: 12px;
+  }
+  .empty-title {
+    font-size: 15px;
+    color: #444444;
+    margin-bottom: 8px;
+  }
+  .empty-hint {
+    font-size: 12px;
+    color: #8a8f99;
+    text-align: center;
+    width: 100%;
+    line-height: 20px;
+  }
+  .bottom-space {
+    height: 36px;
+  }
+</style>

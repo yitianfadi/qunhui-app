@@ -1,0 +1,206 @@
+/**
+ * 应用更新检查 —— 数据源：GitHub Releases
+ *
+ * 工作方式：
+ *   1. 请求 https://api.github.com/repos/<repo>/releases/latest
+ *   2. 取 tag_name 作为最新版本号（支持 v1.0.2 / 1.0.2 两种写法）
+ *   3. 从 assets 里找第一个 *.apk 作为下载地址；没有 apk 时回退到发布页 html_url
+ *
+ * 注意：
+ *   - 未认证调用 GitHub API 有 60 次/小时限流，够用；务必带 User-Agent（否则 403）
+ *   - 版本比较用手写实现，不用 localeCompare（精简 ROM 上字符串 API 更安全）
+ */
+
+export const REPO_SLUG = 'yitianfadi/qunhui-app'
+export const RELEASES_PAGE = 'https://github.com/' + REPO_SLUG + '/releases'
+const LATEST_API = 'https://api.github.com/repos/' + REPO_SLUG + '/releases/latest'
+
+export type AppRelease = {
+  /** 原始 tag，如 v1.0.2 */
+  tagName: string
+  /** 归一化版本号，如 1.0.2 */
+  version: string
+  /** 发布标题 */
+  title: string
+  /** 发布说明（已清洗 Markdown 标记，便于直接弹窗）*/
+  notes: string
+  /** 发布页地址 */
+  pageUrl: string
+  /** apk 下载地址，空字符串表示该版本未附带 apk */
+  apkUrl: string
+  /** apk 字节数，0 表示未知 */
+  apkSize: number
+  /** 发布时间（ISO）*/
+  publishedAt: string
+}
+
+/** 当前安装包版本号（app 端取原生包 versionName，H5 取 manifest 版本）*/
+export function currentVersion(): string {
+  try {
+    const info = uni.getAppBaseInfo()
+    const v = info.appVersion
+    if (v != null && v.length > 0) return v
+  } catch (e) {
+    // 某些平台无此 API，走兜底
+  }
+  return '1.0.1'
+}
+
+/** 版本号比较：a 新于 b 返回 1，a 旧于 b 返回 -1，相同返回 0 */
+export function compareVersion(a: string, b: string): number {
+  const pa = a.split('.')
+  const pb = b.split('.')
+  const n = pa.length > pb.length ? pa.length : pb.length
+  for (let i = 0; i < n; i++) {
+    const ra = i < pa.length ? parseInt(pa[i]) : 0
+    const rb = i < pb.length ? parseInt(pb[i]) : 0
+    // 去掉 -beta / 空格等后缀噪声
+    const xa = isNaN(ra) ? 0 : ra
+    const xb = isNaN(rb) ? 0 : rb
+    if (xa > xb) return 1
+    if (xa < xb) return -1
+  }
+  return 0
+}
+
+/** 把 Markdown 发布说明压成适合弹窗的一行文本 */
+export function plainNotes(md: string, maxLen: number): string {
+  let s = md
+  s = s.split('```').join('')
+  s = s.split('**').join('')
+  s = s.split('###').join('')
+  s = s.split('##').join('')
+  s = s.split('`').join('')
+  s = s.split('\r').join('')
+  s = s.split('\n').join('；')
+  // 压掉连续分隔符与首尾空白
+  while (s.indexOf('；；') >= 0) {
+    s = s.split('；；').join('；')
+  }
+  // 去掉行首的 - / * 列表符号
+  s = s.split('；- ').join('；')
+  s = s.split('；* ').join('；')
+  const t = s.trim()
+  if (t.length > maxLen) return t.slice(0, maxLen) + '…'
+  return t
+}
+
+/** 查询最新 Release；仓库没有 release 时 reject 一个可读错误 */
+export function fetchLatestRelease(): Promise<AppRelease> {
+  return new Promise<AppRelease>((resolve, reject) => {
+    uni.request({
+      url: LATEST_API,
+      method: 'GET',
+      timeout: 15000,
+      header: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'QunHuiApp',
+      } as Record<string, string>,
+      success: (res: any) => {
+        const status: number = res.statusCode ?? 0
+        if (status === 404) {
+          reject(new Error('仓库还没有发布版本'))
+          return
+        }
+        if (status === 403) {
+          reject(new Error('GitHub 访问受限（可能是频率限制），请稍后再试'))
+          return
+        }
+        if (status !== 200) {
+          reject(new Error('GitHub 返回 HTTP ' + status.toString()))
+          return
+        }
+        let body: any = res.data
+        // uni.request 对非标准 Content-Type 不一定自动解析，手动兜底
+        if (typeof body === 'string') {
+          const s = (body as string).trim()
+          if (s.length > 0 && s[0] === '{') {
+            try {
+              body = JSON.parse(s)
+            } catch (e) {
+              body = null
+            }
+          }
+        }
+        if (body == null || typeof body !== 'object') {
+          reject(new Error('GitHub 响应格式异常'))
+          return
+        }
+        const o = body as Record<string, any>
+        const tag = String(o['tag_name'] ?? '')
+        let ver = tag
+        if (ver.length > 0 && (ver[0] === 'v' || ver[0] === 'V')) {
+          ver = ver.slice(1)
+        }
+        if (ver.length === 0) {
+          reject(new Error('发布版本缺少 tag 信息'))
+          return
+        }
+
+        let apkUrl = ''
+        let apkSize = 0
+        const assets = o['assets']
+        if (assets != null) {
+          try {
+            const arr = assets as any[]
+            for (let i = 0; i < arr.length; i++) {
+              const a = arr[i] as Record<string, any>
+              const name = String(a['name'] ?? '').toLowerCase()
+              if (name.endsWith('.apk')) {
+                apkUrl = String(a['browser_download_url'] ?? '')
+                const sz = a['size']
+                if (typeof sz === 'number') apkSize = sz as number
+                break
+              }
+            }
+          } catch (e) {
+            // assets 结构异常时按"没有 apk"处理
+          }
+        }
+
+        resolve({
+          tagName: tag,
+          version: ver,
+          title: String(o['name'] ?? tag),
+          notes: plainNotes(String(o['body'] ?? ''), 220),
+          pageUrl: String(o['html_url'] ?? RELEASES_PAGE),
+          apkUrl: apkUrl,
+          apkSize: apkSize,
+          publishedAt: String(o['published_at'] ?? ''),
+        })
+      },
+      fail: (err: any) => {
+        const msg: string = err?.errMsg ?? '网络不可用'
+        reject(new Error('无法访问 GitHub：' + msg))
+      },
+    } as any)
+  })
+}
+
+/**
+ * 下载 apk 到本地临时目录，返回本地路径
+ * onProgress 回调百分比（0-100）；传 null 表示不关心进度
+ */
+export function downloadApk(url: string, onProgress: ((percent: number) => void) | null): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const task = uni.downloadFile({
+      url: url,
+      success: (res) => {
+        if (res.statusCode !== 200) {
+          reject(new Error('下载失败（HTTP ' + res.statusCode.toString() + '）'))
+          return
+        }
+        resolve(res.tempFilePath)
+      },
+      fail: (err: any) => {
+        const msg: string = err?.errMsg ?? '未知错误'
+        reject(new Error('下载失败：' + msg))
+      },
+    })
+    if (onProgress != null) {
+      task.onProgressUpdate((p) => {
+        onProgress(p.progress)
+      })
+    }
+  })
+}

@@ -1,0 +1,250 @@
+<template>
+  <view class="fp-mask" @click="close">
+    <view class="fp-panel" @click.stop="">
+      <view class="fp-head">
+        <text class="fp-title">{{ title }}</text>
+        <text class="fp-close" @click="close">✕</text>
+      </view>
+
+      <view class="fp-pathbar">
+        <text class="fp-up" :class="canGoUp ? 'fp-up-on' : 'fp-up-off'" @click="goUp">↑</text>
+        <text class="fp-path" max-lines="1">{{ currentPath }}</text>
+      </view>
+
+      <scroll-view class="fp-list" direction="vertical">
+        <text v-if="errorMsg.length > 0" class="fp-error">{{ errorMsg }}</text>
+        <view v-for="(d, i) in dirs" :key="i" class="fp-row" @click="enter(d)">
+          <text class="fp-ico">📁</text>
+          <text class="fp-name" max-lines="1">{{ d.name }}</text>
+          <text class="fp-chevron">›</text>
+        </view>
+        <view v-if="dirs.length === 0 && errorMsg.length === 0 && !loading" class="fp-empty">
+          <text class="fp-empty-text">此目录没有子文件夹</text>
+        </view>
+        <view class="fp-bottom" />
+      </scroll-view>
+
+      <view class="fp-foot">
+        <view class="fp-cancel" @click="close">
+          <text class="fp-cancel-text">取消</text>
+        </view>
+        <view class="fp-ok" @click="confirm">
+          <text class="fp-ok-text">选择此文件夹</text>
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup>
+import { ref, onMounted } from 'vue'
+import { api, FileItem } from '@/utils/syno.uts'
+
+// title 供模板直接使用；显隐由父级 v-if 控制
+defineProps({
+  title: { type: String, default: '选择文件夹' },
+})
+
+const emit = defineEmits(['select', 'close'])
+
+const stack = ref<Array<string>>([])
+const dirs = ref<Array<FileItem>>([])
+const errorMsg = ref('')
+const loading = ref(false)
+const currentPath = ref('/')
+
+const canGoUp = ref(false)
+
+function refreshPath() {
+  currentPath.value = stack.value.length === 0 ? '/' : '/' + stack.value.join('/')
+  canGoUp.value = stack.value.length > 0
+}
+
+async function load() {
+  if (loading.value) return
+  loading.value = true
+  errorMsg.value = ''
+  try {
+    let list: Array<FileItem>
+    if (stack.value.length === 0) {
+      list = await api.listShares()
+    } else {
+      list = await api.listFiles(currentPath.value)
+    }
+    // 只保留文件夹
+    const only: Array<FileItem> = []
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].isDir) only.push(list[i])
+    }
+    dirs.value = only
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : String(e)
+    dirs.value = []
+  } finally {
+    loading.value = false
+  }
+}
+
+function reset() {
+  stack.value = []
+  dirs.value = []
+  errorMsg.value = ''
+  refreshPath()
+  load()
+}
+
+// 组件由父级 v-if 按需挂载，挂载即表示“打开”：直接加载根目录
+onMounted(() => {
+  reset()
+})
+
+function enter(d: FileItem) {
+  stack.value.push(d.name)
+  refreshPath()
+  dirs.value = []
+  load()
+}
+
+function goUp() {
+  if (stack.value.length === 0) return
+  stack.value.pop()
+  refreshPath()
+  dirs.value = []
+  load()
+}
+
+function confirm() {
+  emit('select', currentPath.value)
+  emit('close')
+}
+
+function close() {
+  emit('close')
+}
+</script>
+
+<style>
+  .fp-mask {
+    position: fixed;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.4);
+    justify-content: flex-end;
+  }
+  .fp-panel {
+    height: 520px;
+    background-color: #ffffff;
+    border-radius: 14px 14px 0 0;
+    flex-direction: column;
+  }
+  .fp-head {
+    flex-direction: row;
+    align-items: center;
+    padding: 14px 16px 8px 16px;
+  }
+  .fp-title {
+    flex: 1;
+    font-size: 16px;
+    font-weight: bold;
+    color: #1a1d21;
+  }
+  .fp-close {
+    font-size: 16px;
+    color: #9aa0a8;
+    padding: 4px 8px;
+  }
+  .fp-pathbar {
+    flex-direction: row;
+    align-items: center;
+    padding: 6px 14px;
+    background-color: #f5f7fa;
+    margin: 0 12px;
+    border-radius: 8px;
+  }
+  .fp-up {
+    font-size: 16px;
+    padding: 4px 10px 4px 2px;
+  }
+  .fp-up-on {
+    color: #1e6bb8;
+  }
+  .fp-up-off {
+    color: #cccccc;
+  }
+  .fp-path {
+    flex: 1;
+    font-size: 13px;
+    color: #555555;
+  }
+  .fp-list {
+    flex: 1;
+    margin-top: 6px;
+  }
+  .fp-row {
+    flex-direction: row;
+    align-items: center;
+    padding: 13px 16px;
+    border-bottom: 1px solid #f4f6f8;
+  }
+  .fp-ico {
+    font-size: 18px;
+    margin-right: 10px;
+  }
+  .fp-name {
+    flex: 1;
+    font-size: 15px;
+    color: #1a1d21;
+  }
+  .fp-chevron {
+    font-size: 17px;
+    color: #c8ccd4;
+  }
+  .fp-empty {
+    padding: 40px;
+    align-items: center;
+  }
+  .fp-empty-text {
+    font-size: 13px;
+    color: #9aa0a8;
+  }
+  .fp-error {
+    font-size: 12px;
+    color: #d94838;
+    padding: 16px;
+    text-align: center;
+    width: 100%;
+  }
+  .fp-bottom {
+    height: 12px;
+  }
+  .fp-foot {
+    flex-direction: row;
+    align-items: center;
+    padding: 10px 14px 16px 14px;
+    border-top: 1px solid #f0f2f5;
+  }
+  .fp-cancel {
+    flex: 1;
+    height: 44px;
+    align-items: center;
+    justify-content: center;
+  }
+  .fp-cancel-text {
+    font-size: 15px;
+    color: #6b7280;
+  }
+  .fp-ok {
+    flex: 2;
+    height: 44px;
+    border-radius: 8px;
+    background-color: #1e6bb8;
+    align-items: center;
+    justify-content: center;
+  }
+  .fp-ok-text {
+    font-size: 15px;
+    color: #ffffff;
+  }
+</style>

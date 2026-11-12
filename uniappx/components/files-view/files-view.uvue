@@ -1,0 +1,336 @@
+<template>
+  <view class="files-page">
+    <!-- 路径栏 -->
+    <view class="path-bar">
+      <text class="up-btn" :class="stack.length > 0 ? 'up-btn-on' : 'up-btn-off'" @click="goUp">↑</text>
+      <text class="path-text">{{ currentPath }}</text>
+      <text class="refresh-btn" @click="load">⟳</text>
+    </view>
+
+    <scroll-view class="list" direction="vertical">
+      <text v-if="errorMsg.length > 0" class="text-error error-center">{{ errorMsg }}</text>
+      <view v-for="(item, index) in items" :key="index" class="file-row" @click="openItem(item)" @longpress="onLongPress(item)">
+        <text class="file-icon">{{ item.isDir ? '📁' : '📄' }}</text>
+        <view class="file-info">
+          <text class="file-name">{{ item.name }}</text>
+          <text v-if="item.isDir === false" class="text-secondary">{{ formatSize(item.size) }}</text>
+        </view>
+        <text v-if="item.isDir === true" class="chevron">›</text>
+      </view>
+      <view v-if="items.length === 0 && errorMsg.length === 0" class="empty-box">
+        <text class="text-secondary">暂无内容</text>
+      </view>
+      <view class="list-bottom-space" />
+    </scroll-view>
+
+    <!-- 文件操作弹层 -->
+    <view v-if="actionItem != null" class="mask" @click="actionItem = null">
+      <view class="sheet" @click.stop="">
+        <text class="sheet-title">{{ actionItem?.name }}</text>
+        <view class="sheet-item" @click="downloadFile">
+          <text>⬇️ 下载到本机</text>
+        </view>
+        <view class="sheet-item" @click="makeShareLink">
+          <text>🔗 创建共享链接</text>
+        </view>
+        <view class="sheet-item" @click="deleteFile">
+          <text style="color:#d94838;">🗑️ 删除</text>
+        </view>
+        <view class="sheet-item" @click="actionItem = null">
+          <text class="text-secondary">取消</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- 下载进度与完成提示统一在「下载管理」页展示，此处不再弹框 -->
+
+    <!-- 新建文件夹 FAB -->
+    <view v-if="stack.length > 0" class="fab" @click="createFolder">
+      <text class="fab-text">＋📁</text>
+    </view>
+  </view>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { api, formatSize, FileItem } from '@/utils/syno.uts'
+import { startDownload } from '@/utils/download_manager.uts'
+import { backupFolder } from '@/utils/backup_helper.uts'
+
+const stack = ref<Array<string>>([])
+const items = ref<Array<FileItem>>([])
+const errorMsg = ref('')
+const loading = ref(false)
+const actionItem = ref<FileItem | null>(null)
+const shareLink = ref('')
+
+const currentPath = ref('/')
+
+function refreshPath() {
+  currentPath.value = stack.value.length === 0 ? '/' : '/' + stack.value.join('/')
+}
+
+async function load() {
+  if (loading.value) return
+  loading.value = true
+  errorMsg.value = ''
+  // 目录切换时加载：弹加载动画，加载完成后再显示内容
+  uni.showLoading({ title: '加载中', mask: true } as any)
+  try {
+    if (stack.value.length === 0) {
+      items.value = await api.listShares()
+    } else {
+      items.value = await api.listFiles(currentPath.value)
+    }
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : String(e)
+    items.value = []
+  } finally {
+    uni.hideLoading()
+    loading.value = false
+  }
+}
+
+load()
+
+function openItem(item: FileItem) {
+  if (item.isDir) {
+    stack.value.push(item.name)
+    refreshPath()
+    items.value = [] // 先清空旧目录内容，避免残留
+    load()
+  } else {
+    actionItem.value = item
+  }
+}
+
+/** 长按文件夹：可直接把整个目录备份到本机 */
+function onLongPress(item: FileItem) {
+  if (!item.isDir) return
+  uni.showActionSheet({
+    itemList: ['进入文件夹', '备份此文件夹到本机'],
+    success: (res) => {
+      if (res.tapIndex === 0) {
+        openItem(item)
+      } else {
+        backupFolderToDevice(item)
+      }
+    },
+  })
+}
+
+async function backupFolderToDevice(item: FileItem) {
+  uni.showLoading({ title: '扫描目录中', mask: true } as any)
+  try {
+    const r = await backupFolder(item.path, 200, (text: string) => {
+      uni.showLoading({ title: text, mask: true } as any)
+    })
+    uni.hideLoading()
+    uni.showToast({ title: '已加入 ' + r.files + ' 个文件', icon: 'none' })
+    if (r.truncated) {
+      uni.showModal({
+        title: '已达单次上限',
+        content: '单次最多备份 200 个文件，剩余内容请在「备份与恢复」页分批处理。',
+        showCancel: false,
+      })
+    }
+  } catch (e) {
+    uni.hideLoading()
+    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+  }
+}
+
+function goUp() {
+  if (stack.value.length === 0) return
+  stack.value.pop()
+  refreshPath()
+  items.value = []
+  load()
+}
+
+function downloadFile() {
+  const item = actionItem.value
+  actionItem.value = null
+  if (item == null) return
+  // 统一走下载队列：App 端后台下载并可在「下载管理」查看进度，Web 端交给浏览器
+  startDownload(api.downloadFileUrl(item.path), item.name, item.path)
+  // #ifdef WEB
+  uni.showToast({ title: '已开始浏览器下载', icon: 'none' })
+  // #endif
+  // #ifndef WEB
+  uni.showToast({ title: '已加入下载列表', icon: 'none' })
+  // #endif
+}
+
+async function makeShareLink() {
+  const item = actionItem.value
+  if (item != null) {
+    try {
+      const link = await api.createShareLink(item.path)
+      // #ifdef WEB
+      window.prompt('共享链接：', link)
+      // #endif
+      // #ifndef WEB
+      uni.setClipboardData({ data: link })
+      uni.showToast({ title: '共享链接已复制', icon: 'none' })
+      // #endif
+    } catch (e) {
+      uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+    }
+  }
+  actionItem.value = null
+}
+
+function deleteFile() {
+  const item = actionItem.value
+  actionItem.value = null
+  if (item != null) {
+    uni.showModal({
+      title: '删除确认',
+      content: '确定删除 ' + item.name + '？该操作不可撤销。',
+      success: async (res) => {
+        if (res.confirm) {
+          try {
+            await api.deleteFiles([item.path])
+            load()
+          } catch (e) {
+            uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+          }
+        }
+      },
+    })
+  }
+}
+
+function createFolder() {
+  uni.showModal({
+    title: '新建文件夹',
+    editable: true,
+    placeholderText: '文件夹名称',
+    success: async (res) => {
+      if (res.confirm && res.content != null && res.content.length > 0) {
+        try {
+          await api.createFolder(currentPath.value, res.content)
+          load()
+        } catch (e) {
+          uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+        }
+      }
+    },
+  })
+}
+</script>
+
+<style>
+  .files-page {
+    flex: 1;
+    flex-direction: column;
+  }
+  .path-bar {
+    flex-direction: row;
+    align-items: center;
+    padding: 8px 12px;
+  }
+  .up-btn {
+    font-size: 18px;
+    padding: 4px 10px;
+  }
+  .up-btn-on {
+    color: #1e6bb8;
+  }
+  .up-btn-off {
+    color: #cccccc;
+  }
+  .path-text {
+    flex: 1;
+    font-size: 13px;
+    color: #555555;
+  }
+  .refresh-btn {
+    font-size: 16px;
+    color: #1e6bb8;
+    padding: 4px 10px;
+  }
+  .list {
+    flex: 1;
+  }
+  .file-row {
+    flex-direction: row;
+    align-items: center;
+    background-color: #ffffff;
+    padding: 12px;
+    margin: 4px 12px;
+    border-radius: 8px;
+  }
+  .file-icon {
+    font-size: 22px;
+    margin-right: 10px;
+  }
+  .file-info {
+    flex: 1;
+    flex-direction: column;
+  }
+  .file-name {
+    font-size: 15px;
+    color: #222222;
+  }
+  .chevron {
+    font-size: 18px;
+    color: #cccccc;
+  }
+  .error-center {
+    width: 100%;
+    text-align: center;
+    padding: 24px;
+  }
+  .empty-box {
+    padding: 48px;
+    align-items: center;
+  }
+  .list-bottom-space {
+    height: 80px;
+  }
+  .mask {
+    position: fixed;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.4);
+    justify-content: flex-end;
+  }
+  .mask-center {
+    justify-content: center;
+    align-items: center;
+  }
+  .sheet {
+    background-color: #ffffff;
+    border-radius: 12px 12px 0 0;
+    padding: 16px;
+  }
+  .sheet-title {
+    font-size: 16px;
+    font-weight: bold;
+    margin-bottom: 12px;
+    color: #222222;
+  }
+  .sheet-item {
+    padding: 12px 4px;
+    border-top: 1px solid #f0f0f0;
+  }
+  .fab {
+    position: fixed;
+    right: 20px;
+    bottom: 80px;
+    width: 52px;
+    height: 52px;
+    border-radius: 26px;
+    background-color: #1e6bb8;
+    align-items: center;
+    justify-content: center;
+  }
+  .fab-text {
+    font-size: 14px;
+    color: #ffffff;
+  }
+</style>

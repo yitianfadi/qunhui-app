@@ -1,0 +1,1253 @@
+/**
+ * 群晖 DSM Web API 客户端（uni-app x 蒸汽模式 / ts）
+ *
+ * 联调经验（与 Flutter 版一致）：
+ * - FileStation.Info.list_share 仅支持 v1
+ * - Foto 的 additional 必须传 JSON 数组字符串 '["thumbnail"]'
+ * - Foto item 时间字段是 time(unix 秒)，缩略图在 additional.thumbnail.cache_key
+ * - 错误 120 = 参数条件无效，error.errors 会带 {name, reason}
+ * - DSM 数组参数支持重复键（path=a&path=b）
+ */
+
+// ---------------- 数据类型 ----------------
+
+export type ApiEntry = {
+  api: string
+  path: string
+  minVersion: number
+  maxVersion: number
+  requestFormat: string
+}
+
+export type NasAccount = {
+  id: string
+  name: string
+  protocol: string
+  host: string
+  port: number
+  username: string
+  /** QuickConnect ID（如 abcd123efg，可选） */
+  qcId: string
+  /** 连接模式：auto=自动切换 / direct=仅直连 / quickconnect=仅 QuickConnect */
+  transport: string
+}
+
+/** QuickConnect 候选端点（按 LAN → WAN → 中继 优先级） */
+export type QcEndpoint = {
+  label: string
+  baseUrl: string
+}
+
+export type FileItem = {
+  name: string
+  path: string
+  isDir: boolean
+  size: number
+  modified: string
+}
+
+export type PhotoItem = {
+  unitId: number
+  fileName: string
+  takenTime: string
+  cacheKey: string
+  isVideo: boolean
+}
+
+// UTS 不支持内联对象字面量类型（UTS110111101），列表返回值必须用命名类型
+export type PhotoListResult = {
+  list: PhotoItem[]
+  total: number
+}
+
+export type DownloadTask = {
+  id: string
+  title: string
+  status: string
+  size: number
+  transferred: number
+  speed: number
+  progress: number
+}
+
+// ---------------- 工具 ----------------
+
+// 注意：这里刻意不用 toFixed / String.format / toLocaleString。
+// 部分 ROM（如精简版模拟器镜像）缺 ICU currency 数据，String.format 走
+// DecimalFormatSymbols → Currency → ICU 时会抛 NPE 直接崩进程。
+export function pad2(n: number): string {
+  return n < 10 ? '0' + n.toString() : n.toString()
+}
+
+/** 保留 1 位小数的整数除法拼接（不依赖 ICU） */
+function fixed1(v: number): string {
+  const t = Math.round(v * 10)
+  const ip = Math.floor(t / 10)
+  const fp = t - ip * 10
+  return ip.toString() + '.' + fp.toString()
+}
+
+export function formatSize(bytes: number): string {
+  if (bytes <= 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = bytes
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v = v / 1024
+    i++
+  }
+  return (i === 0 ? Math.round(v).toString() : fixed1(v)) + ' ' + units[i]
+}
+
+/** 时间格式化（手写，不用 toLocaleString：见上）*/
+export function formatDateTime(ms: number): string {
+  if (ms <= 0) return ''
+  const d = new Date(ms)
+  return d.getFullYear().toString() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+    ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+}
+
+export function formatDate(ms: number): string {
+  if (ms <= 0) return ''
+  const d = new Date(ms)
+  return d.getFullYear().toString() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+}
+
+export function downloadStatusText(status: string): string {
+  const map: Record<string, string> = {
+    downloading: '下载中',
+    paused: '已暂停',
+    finished: '已完成',
+    seeding: '做种中',
+    error: '错误',
+    extracting: '解压中',
+    waiting: '等待中',
+    preparing: '准备中',
+    hash_checking: '校验中',
+  }
+  return map[status] ?? status
+}
+
+const COMMON_ERRORS: Record<string, string> = {
+  '100': '未知错误',
+  '101': '参数无效',
+  '102': 'API 不存在（请检查套件是否安装）',
+  '103': '方法不存在',
+  '104': 'API 版本不支持',
+  '105': '用户权限不足',
+  '106': '连接超时',
+  '107': '鉴权失败',
+  '119': 'sid 无效或会话已过期',
+  '120': '参数条件无效',
+  '400': '账号不存在或密码错误',
+  '401': '账号已被禁用',
+  '402': '没有登录权限',
+  '403': '需要两步验证码（OTP）',
+  '404': '两步验证码错误',
+  '405': '应用密码未启用',
+  '406': '应用密码错误',
+  '407': '两步验证码已过期',
+  '408': '两步验证未启用',
+  '409': '设备令牌不可用',
+  '410': '设备令牌无效',
+}
+
+function objOf(v: any): Record<string, any> | null {
+  return v !== null && v !== undefined && typeof v === 'object' ? v : null
+}
+
+function strOf(m: Record<string, any> | null, k: string): string {
+  if (m == null) return ''
+  const v = m[k]
+  if (typeof v === 'string') return v
+  if (typeof v === 'number') return String(v)
+  return ''
+}
+
+// App 端 UTS 的 || 仅接受布尔操作数，空串回退一律用本函数
+function strOr(m: Record<string, any> | null, k: string, fallback: string): string {
+  const v = strOf(m, k)
+  return v.length > 0 ? v : fallback
+}
+
+function numOf(m: Record<string, any> | null, k: string): number {
+  if (m == null) return 0
+  const v = m[k]
+  return typeof v === 'number' ? v : 0
+}
+
+function encodeParams(params: Record<string, any>): string {
+  const parts: string[] = []
+  for (const key in params) {
+    const v = params[key]
+    if (v === null || v === undefined) continue
+    if (Array.isArray(v)) {
+      // DSM 接受重复键形式的数组参数
+      for (const item of v) {
+        parts.push(key + '=' + encodeURIComponent(String(item)))
+      }
+    } else {
+      parts.push(key + '=' + encodeURIComponent(String(v)))
+    }
+  }
+  return parts.join('&')
+}
+
+// ---------------- API 客户端 ----------------
+
+export class SynoError extends Error {
+  code: number
+  constructor(code: number, message: string) {
+    super(message)
+    this.code = code
+  }
+}
+
+export class SynoApi {
+  baseUrl = ''
+  pathPrefix = '/webapi'
+  sid = ''
+  password = ''
+  account: NasAccount | null = null
+  apiTable: Record<string, ApiEntry> = {}
+  /** 上次连接成功的端点（下次优先尝试，实现自动切换记忆） */
+  lastGood = ''
+  lastGoodLabel = ''
+  private _switching = false
+
+  static load(): SynoApi {
+    // getStorageSync 在 key 不存在时返回 null/undefined，直接 as string + .length 会崩
+    const rawAny = uni.getStorageSync('syno_api_state')
+    const raw: string = rawAny == null ? '' : (typeof rawAny === 'string' ? (rawAny as string) : '')
+    if (raw.length > 0) {
+      try {
+        const m = JSON.parse(raw)
+        if (m == null || typeof m !== 'object') {
+          return new SynoApi()
+        }
+        const state = m as Record<string, any>
+        const api = new SynoApi()
+        api.baseUrl = strOf(state, 'baseUrl')
+        api.pathPrefix = strOr(state, 'pathPrefix', '/webapi')
+        api.sid = strOf(state, 'sid')
+        api.password = strOf(state, 'password')
+        const acc = objOf(state['account'])
+        if (acc != null) {
+        api.account = {
+          id: strOf(acc, 'id'),
+          name: strOf(acc, 'name'),
+          protocol: strOf(acc, 'protocol'),
+          host: strOf(acc, 'host'),
+          port: numOf(acc, 'port'),
+          username: strOf(acc, 'username'),
+          qcId: strOf(acc, 'qcId'),
+          transport: strOr(acc, 'transport', 'auto'),
+        }
+      }
+      api.lastGood = strOf(state, 'lastGood')
+      api.lastGoodLabel = strOf(state, 'lastGoodLabel')
+        // 恢复 API 表（刷新页面后无需重新发现）
+        const tbl = objOf(state['apiTable'])
+        if (tbl != null) {
+          for (const key in tbl) {
+            const e = objOf(tbl[key])
+            if (e != null) {
+              api.apiTable[key] = {
+                api: key,
+                path: strOr(e, 'path', 'entry.cgi'),
+                minVersion: 1,
+                maxVersion: typeof e['maxVersion'] === 'number' ? e['maxVersion'] : 1,
+                requestFormat: strOf(e, 'requestFormat'),
+              }
+            }
+          }
+        }
+        return api
+      } catch (e) {
+        // 忽略坏数据
+      }
+    }
+    return new SynoApi()
+  }
+
+  save() {
+    uni.setStorageSync(
+      'syno_api_state',
+      JSON.stringify({
+        baseUrl: this.baseUrl,
+        pathPrefix: this.pathPrefix,
+        sid: this.sid,
+        password: this.password,
+        account: this.account,
+        apiTable: this.apiTable,
+        lastGood: this.lastGood,
+        lastGoodLabel: this.lastGoodLabel,
+      } as Record<string, any>)
+    )
+  }
+
+  clear() {
+    this.sid = ''
+    this.password = ''
+    this.account = null
+    uni.removeStorageSync('syno_api_state')
+  }
+
+  get loggedIn(): boolean {
+    return this.sid.length > 0 && this.account != null
+  }
+
+  private entry(api: string): ApiEntry {
+    const e = this.apiTable[api]
+    if (e == null) {
+      throw new SynoError(102, 'NAS 上未找到 API：' + api + '（请确认对应套件已安装）')
+    }
+    return e
+  }
+
+  private async getJson(url: string, timeoutMs: number = 30000): Promise<Record<string, any>> {
+    return new Promise((resolve, reject) => {
+      uni.request({
+        url: url,
+        method: 'GET',
+        timeout: timeoutMs,
+        success: (res: any) => {
+          let data: any = res.data
+          // DSM 个别响应 Content-Type 不标准，uni.request 不会自动解析 → 手动兜底
+          if (typeof data === 'string') {
+            const s = (data as string).trim()
+            if (s.length > 0 && (s[0] === '{' || s[0] === '[')) {
+              try {
+                data = JSON.parse(s)
+              } catch (e) {
+                data = null
+              }
+            }
+          }
+          if (data != null && typeof data === 'object') {
+            resolve(data as Record<string, any>)
+          } else {
+            const head = String(res.data ?? '').slice(0, 80)
+            reject(new SynoError(100, '响应格式异常（非 JSON）：' + head))
+          }
+        },
+        fail: (err: any) => {
+          const msg: string = err?.errMsg ?? '网络请求失败'
+          // uni.request 解析 JSON 失败（服务器返回 HTML 错误页）→ 归类为「非 JSON」，交给上层降级
+          if (msg.indexOf('invalid json') >= 0) {
+            reject(new SynoError(100, '响应不是 JSON：' + msg))
+            return
+          }
+          reject(new SynoError(106, '网络请求失败：' + msg))
+        },
+      } as any)
+    })
+  }
+
+  /** POST JSON body（DSM 7.4 FileStation requestFormat=JSON 的 API 用 GET 会返回 HTML 错误页） */
+  private async postJsonBody(url: string, body: Record<string, any>, timeoutMs: number = 30000): Promise<Record<string, any>> {
+    return new Promise((resolve, reject) => {
+      uni.request({
+        url: url,
+        method: 'POST',
+        timeout: timeoutMs,
+        header: { 'Content-Type': 'application/json' },
+        data: body,
+        success: (res: any) => {
+          let data: any = res.data
+          if (typeof data === 'string') {
+            const s = (data as string).trim()
+            if (s.length > 0 && (s[0] === '{' || s[0] === '[')) {
+              try {
+                data = JSON.parse(s)
+              } catch (e) {
+                data = null
+              }
+            }
+          }
+          if (data != null && typeof data === 'object') {
+            resolve(data as Record<string, any>)
+          } else {
+            const head = String(res.data ?? '').replace(/\s+/g, ' ').slice(0, 60)
+            reject(new SynoError(100, '响应格式异常（非 JSON）：' + head))
+          }
+        },
+        fail: (err: any) => {
+          const msg: string = err?.errMsg ?? '网络请求失败'
+          // uni.request 解析 JSON 失败（服务器返回 HTML 错误页）→ 归类为「非 JSON」，交给上层降级
+          if (msg.indexOf('invalid json') >= 0) {
+            reject(new SynoError(100, '响应不是 JSON：' + msg))
+            return
+          }
+          reject(new SynoError(106, '网络请求失败：' + msg))
+        },
+      } as any)
+    })
+  }
+
+  /** POST 表单方式重试（部分方法对 GET 兼容不佳） */
+  private async postFormJson(url: string): Promise<Record<string, any>> {
+    return new Promise((resolve, reject) => {
+      const idx = url.indexOf('?')
+      const base = idx >= 0 ? url.substring(0, idx) : url
+      const query = idx >= 0 ? url.substring(idx + 1) : ''
+      uni.request({
+        url: base,
+        method: 'POST',
+        timeout: 30000,
+        header: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        data: query,
+        success: (res: any) => {
+          let data: any = res.data
+          if (typeof data === 'string') {
+            const s = (data as string).trim()
+            if (s.length > 0 && (s[0] === '{' || s[0] === '[')) {
+              try {
+                data = JSON.parse(s)
+              } catch (e) {
+                data = null
+              }
+            }
+          }
+          if (data != null && typeof data === 'object') {
+            resolve(data as Record<string, any>)
+          } else {
+            const head = String(res.data ?? '').slice(0, 80)
+            reject(new SynoError(100, '响应格式异常（非 JSON）：' + head))
+          }
+        },
+        fail: (err: any) => {
+          const msg: string = err?.errMsg ?? '网络请求失败'
+          // uni.request 解析 JSON 失败（服务器返回 HTML 错误页）→ 归类为「非 JSON」，交给上层降级
+          if (msg.indexOf('invalid json') >= 0) {
+            reject(new SynoError(100, '响应不是 JSON：' + msg))
+            return
+          }
+          reject(new SynoError(106, '网络请求失败：' + msg))
+        },
+      } as any)
+    })
+  }
+
+  private parseError(json: Record<string, any>, api: string): SynoError {
+    const proxyErr = strOf(json, 'proxy_error')
+    if (proxyErr.length > 0) {
+      return new SynoError(
+        -1,
+        '本地代理无法连接 NAS：请确认代理已用正确的 NAS IP 启动（dart run tools/dev_proxy.dart <NAS_IP> <NAS端口> 8090）\n代理错误：' +
+          proxyErr
+      )
+    }
+    const err = objOf(json['error'])
+    const code = err != null ? numOf(err, 'code') : 100
+    let base = COMMON_ERRORS[String(code)] ?? '错误码 ' + code
+    // FileStation 的部分错误码语义与 Auth 不同，按 API 覆盖成更可操作的提示
+    if (api.indexOf('SYNO.FileStation') === 0) {
+      if (code === 408) {
+        base = '目标目录不存在，请选已存在的共享文件夹（如 /home、/photo）'
+      } else if (code === 401) {
+        base = '目标目录不存在或没有写入权限'
+      } else if (code === 105) {
+        base = '当前账号对该目录没有写入权限'
+      } else if (code === 414) {
+        base = '已有同名文件正在上传，请稍后重试'
+      }
+    } else if (api.indexOf('SYNO.FotoTeam') === 0 && code === 801) {
+      // 实测：个人空间正常返回空列表，共享空间直接 801 → 账号无共享空间权限
+      base = '没有共享空间权限。请在 NAS 的 Synology Photos → 设置 → 共享空间 中给该账号授权'
+    } else if (api.indexOf('SYNO.Foto') === 0 && code === 801) {
+      base = 'Synology Photos 服务不可用或该账号无权限，请在套件中心确认已启用'
+    }
+    let msg = base
+    const detail = err != null ? objOf(err['errors']) : null
+    if (detail != null && strOf(detail, 'name').length > 0) {
+      msg += '（参数 ' + strOf(detail, 'name') + '：' + strOr(detail, 'reason', '无效') + '）'
+    }
+    return new SynoError(code, msg + '｜' + api)
+  }
+
+  /** API 发现：按账号的直连地址设置 baseUrl 并查询所需 API 的 path/版本 */
+  async discover(account: NasAccount) {
+    this.baseUrl = account.protocol + '://' + account.host + ':' + account.port
+    this.account = account
+    await this.discoverAt(this.baseUrl)
+  }
+
+  /** 在指定端点上做 API 发现（discover 与 connectAuto 共用） */
+  private async discoverAt(base: string) {
+    const apis = [
+      'SYNO.API.Auth', 'SYNO.FileStation.List', 'SYNO.FileStation.Info',
+      'SYNO.FileStation.Download', 'SYNO.FileStation.Upload', 'SYNO.FileStation.Thumb',
+      'SYNO.FileStation.CreateFolder', 'SYNO.FileStation.Rename', 'SYNO.FileStation.Delete',
+      'SYNO.FileStation.Share', 'SYNO.DownloadStation.Info', 'SYNO.DownloadStation.Task',
+      'SYNO.Foto.Browse.Item', 'SYNO.Foto.Browse.Folder', 'SYNO.Foto.Browse.Album',
+      'SYNO.Foto.Thumbnail', 'SYNO.Foto.Download', 'SYNO.FotoTeam.Browse.Item',
+    ]
+    const url =
+      base + this.pathPrefix +
+      '/query.cgi?api=SYNO.API.Info&version=1&method=query&query=' +
+      encodeURIComponent(apis.join(','))
+    const json = await this.getJson(url)
+    if (json['success'] !== true) {
+      throw new SynoError(100, 'API 发现失败，请检查地址与端口')
+    }
+    const data = objOf(json['data']) ?? {}
+    this.apiTable = {}
+    for (const key in data) {
+      const e = objOf(data[key])
+      if (e != null) {
+        this.apiTable[key] = {
+          api: key,
+          path: strOr(e, 'path', 'entry.cgi'),
+          minVersion: 1,
+          maxVersion: typeof e['maxVersion'] === 'number' ? e['maxVersion'] : 1,
+          requestFormat: strOf(e, 'requestFormat'),
+        }
+      }
+    }
+  }
+
+  /** 登录（v6+，支持 OTP；成功后保存 did 免 OTP） */
+  async login(password: string, otp: string): Promise<void> {
+    const e = this.entry('SYNO.API.Auth')
+    const params: Record<string, any> = {
+      api: 'SYNO.API.Auth',
+      version: e.maxVersion,
+      method: 'login',
+      account: this.account?.username ?? '',
+      passwd: password,
+      session: 'QunHuiApp',
+      format: 'sid',
+      enable_device_token: 'yes',
+    }
+    if (otp.length > 0) params['otp'] = otp
+    const url = this.baseUrl + this.pathPrefix + '/' + e.path + '?' + encodeParams(params)
+    const json = await this.getJson(url)
+    if (json['success'] !== true) throw this.parseError(json, 'SYNO.API.Auth')
+    const data = objOf(json['data']) ?? {}
+    this.sid = strOf(data, 'sid')
+    this.password = password
+    // 保存设备令牌（did），下次免 OTP
+    const did = strOf(data, 'did')
+    if (did.length > 0 && this.account != null) {
+      uni.setStorageSync('syno_did_' + this.account.id, did)
+    }
+    this.save()
+  }
+
+  /** 统一调用，自动带 sid，会话失效（119/105）自动重登一次 */
+  async call(api: string, method: string, params?: Record<string, any>, version?: number): Promise<Record<string, any>> {
+    let e = this.apiTable[api]
+    // API 表为空（如刷新后状态异常）时自动重新发现
+    if (e == null && this.sid.length > 0 && this.account != null) {
+      await this.discover(this.account)
+      this.save()
+      e = this.apiTable[api]
+    }
+    if (e == null) {
+      throw new SynoError(102, 'NAS 上未找到 API：' + api + '（请确认对应套件已安装）')
+    }
+    const p: Record<string, any> = {
+      api: api,
+      version: version ?? e.maxVersion,
+      method: method,
+      _sid: this.sid,
+      ...(params ?? {}),
+    }
+    const urlQ = this.baseUrl + this.pathPrefix + '/' + e.path + '?' + encodeParams(p)
+    // 实测 DSM 7.4：对 FileStation.List 的 list 方法 POST JSON 会返回 101，
+    // 而 GET（参数正确编码时）正常。因此统一 GET 优先；
+    // 若 GET 收到 HTML 错误页（uni.request 报 invalid json → SynoError 100），
+    // 再降级 POST JSON → POST 表单。
+    const postUrl = (): string =>
+      this.baseUrl + this.pathPrefix + '/' + e.path + '?' + encodeParams({
+        api: api,
+        version: p['version'],
+        method: method,
+        _sid: this.sid,
+      })
+    let json: Record<string, any>
+    try {
+      json = await this.getJson(urlQ)
+    } catch (err) {
+      // 网络异常 → 自动切换 QuickConnect 通道后重试一次（LAN↔WAN↔中继）
+      if (err instanceof SynoError && err.code === 106 && !this._switching) {
+        const switched = await this.switchTransport()
+        if (switched) {
+          json = await this.call(api, method, params, version)
+          if (json['success'] !== true) throw this.parseError(json, api)
+          return objOf(json['data']) ?? {}
+        }
+      }
+      // 119/105 = 会话失效；400/402 = 会话被同名校验踢掉（如同名 session 在别处登录）
+      // 这些都视为「会话无效」：密码已持久化时静默重登一次再重试（Auth 自身的 400 是密码错误，不在此列）
+      if (
+        err instanceof SynoError &&
+        (err.code === 119 || err.code === 105 || (err.code === 400 && api !== 'SYNO.API.Auth') || (err.code === 402 && api !== 'SYNO.API.Auth')) &&
+        this.password.length > 0
+      ) {
+        await this.login(this.password, '')
+        p['_sid'] = this.sid
+        json = await this.getJson(this.baseUrl + this.pathPrefix + '/' + e.path + '?' + encodeParams(p))
+      } else if (err instanceof SynoError && err.code === 100) {
+        // 非 JSON 响应（DSM 7.4 部分参数组合下 GET 会返回 HTML 错误页）
+        // → 先 POST JSON body，再退 POST 表单
+        const url2 = postUrl()
+        try {
+          json = await this.postJsonBody(url2, p)
+        } catch (err2) {
+          if (err2 instanceof SynoError && err2.code === 100) {
+            json = await this.postFormJson(urlQ)
+          } else {
+            throw err2
+          }
+        }
+      } else {
+        throw err
+      }
+    }
+    if (json['success'] !== true) throw this.parseError(json, api)
+    return objOf(json['data']) ?? {}
+  }
+
+  // ---------------- QuickConnect ----------------
+
+  /**
+   * QuickConnect 隧道解析（仅 App 原生端使用；Web 端由本地代理解析）
+   * CN 区: POST https://global.quickconnect.cn/Serv.php（request_tunnel）
+   * Intl 回退: GET https://cnc.synology.com/api/v2/quickconnect
+   */
+  private async qcTunnel(qid: string): Promise<Record<string, any>> {
+    // #ifndef WEB
+    const body: Record<string, any> = {
+      version: 1,
+      id: 'dsm',
+      serverID: qid,
+      platform: 'Android',
+      command: 'request_tunnel',
+    }
+    const hosts = ['https://global.quickconnect.cn/Serv.php', 'https://global.quickconnect.com/Serv.php']
+    let lastErr: any = null
+    for (const h of hosts) {
+      try {
+        const t = await this.postJsonBody(h, body, 15000)
+        const errno = numOf(t, 'errno')
+        const svc = objOf(t['service'])
+        if (errno === 0 && (svc != null || objOf(t['smartdns']) != null)) {
+          return t
+        }
+        lastErr = new SynoError(-2, 'QuickConnect ID 无效或服务未启用（errno=' + errno + '）')
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    // 国际区回退：cnc.synology.com v2 接口
+    try {
+      const t2 = await this.getJson(
+        'https://cnc.synology.com/api/v2/quickconnect?command=request_tunnel&version=1&id=' +
+          encodeURIComponent(qid),
+        15000
+      )
+      if (t2['success'] === true) return t2
+      lastErr = new SynoError(-2, 'QuickConnect ID 无效（国际区响应异常）')
+    } catch (e) {
+      lastErr = e
+    }
+    throw lastErr != null ? lastErr : new SynoError(-2, 'QuickConnect 服务器不可达')
+    // #endif
+    // #ifdef WEB
+    throw new SynoError(-2, 'Web 端不直接解析 QuickConnect（由本地代理处理）')
+    // #endif
+  }
+
+  /** 从隧道响应提取候选端点：LAN 直连 → WAN 直连 → QuickConnect 中继 → 官方门户兜底 */
+  private qcEndpointsFrom(tunnel: Record<string, any>, qid: string): QcEndpoint[] {
+    const list: QcEndpoint[] = []
+    const service = objOf(tunnel['service'])
+    const smart = objOf(tunnel['smartdns'])
+    let dsmPort = service != null ? numOf(service, 'port') : 0
+    if (dsmPort <= 0) dsmPort = 5000
+
+    // NAS 离线（ds_state != CONNECTED）时 smartdns/lan 候选会探活失败，仅中继可用——候选顺序天然覆盖该场景
+
+    // 1) LAN 直连（smartdns.lan 子域名内嵌 NAS 内网 IP，如 192-168-1-5.xxx.direct.quickconnect.cn）
+    if (smart != null) {
+      const lan = (smart['lan'] as any[]) ?? []
+      for (const h0 of lan) {
+        const h = typeof h0 === 'string' ? h0 : ''
+        if (h.length > 0) {
+          list.push({ label: 'LAN直连', baseUrl: 'http://' + h + ':' + dsmPort })
+        }
+      }
+    }
+    // 2) WAN 直连（smartdns.host 解析到公网 IP，需要路由器端口转发）
+    if (smart != null && strOf(smart, 'host').length > 0) {
+      list.push({ label: 'WAN直连', baseUrl: 'http://' + strOf(smart, 'host') + ':' + dsmPort })
+    }
+    // 3) QuickConnect 中继（relay_dn:relay_port，群晖中继服务器转发，永远可达）
+    if (service != null && strOf(service, 'relay_dn').length > 0) {
+      const rp = numOf(service, 'relay_port')
+      list.push({
+        label: 'QuickConnect中继',
+        baseUrl: 'https://' + strOf(service, 'relay_dn') + ':' + (rp > 0 ? rp : 443),
+      })
+    }
+    // 4) 官方门户域名兜底
+    list.push({ label: 'QC门户', baseUrl: 'https://' + qid + '.quickconnect.cn' })
+    return list
+  }
+
+  /** 国际区 v2 响应解析 */
+  private qcEndpointsIntl(tunnel: Record<string, any>, qid: string): QcEndpoint[] {
+    const list: QcEndpoint[] = []
+    const data = objOf(tunnel['data']) ?? {}
+    const services = (data['services'] as any[]) ?? []
+    for (const s0 of services) {
+      const s = objOf(s0)
+      if (s == null || strOf(s, 'dn') !== 'dsm') continue
+      const urls = (s['url'] as any[]) ?? []
+      for (const u0 of urls) {
+        const u = typeof u0 === 'string' ? u0 : ''
+        if (u.length > 0) {
+          list.push({ label: 'WAN直连', baseUrl: 'http://' + u })
+        }
+      }
+      const relays = (s['relay_dns'] as any[]) ?? []
+      for (const r0 of relays) {
+        const r = typeof r0 === 'string' ? r0 : ''
+        if (r.length > 0) {
+          const rp = numOf(s, 'port')
+          list.push({ label: 'QuickConnect中继', baseUrl: 'https://' + r + ':' + (rp > 0 ? rp : 443) })
+        }
+      }
+    }
+    if (list.length === 0) {
+      list.push({ label: 'QC门户', baseUrl: 'https://' + qid + '.quickconnect.com' })
+    }
+    return list
+  }
+
+  /** 端点探活：DSM 存在 /webman/pingpong.cgi，任何 JSON 响应即视为可达 */
+  private async probeAlive(base: string): Promise<boolean> {
+    try {
+      const r = await this.getJson(base + '/webman/pingpong.cgi?quickconnect=true', 8000)
+      return typeof r === 'object'
+    } catch (e) {
+      return false
+    }
+  }
+
+  /** 统一连接入口：按模式自动尝试多个端点（lastGood 优先），成功后记忆 */
+  async connectAuto(account: NasAccount, password: string, otp: string): Promise<void> {
+    const mode = account.transport.length > 0 ? account.transport : 'auto'
+    // #ifdef WEB
+    // Web 端所有流量经本地代理：把 QuickConnect ID 交给代理解析并自动轮换目标
+    // 注意：Web 端 account.host 即代理地址（登录页自动预填），不能作为直连候选传给代理
+    this.baseUrl = account.protocol + '://' + account.host + ':' + account.port
+    if (account.qcId.length > 0 && mode !== 'direct') {
+      const q = '/__qc/resolve?qid=' + encodeURIComponent(account.qcId)
+      const r = await this.getJson(this.baseUrl + q, 25000)
+      if (r['success'] !== true) {
+        throw new SynoError(-2, 'QuickConnect 解析失败：' + strOr(r, 'message', '未知原因'))
+      }
+    }
+    this.account = account
+    await this.discoverAt(this.baseUrl)
+    await this.login(password, otp)
+    // #endif
+    // #ifndef WEB
+    const cands: QcEndpoint[] = []
+    if (mode !== 'quickconnect' && account.host.length > 0) {
+      cands.push({ label: '直连', baseUrl: account.protocol + '://' + account.host + ':' + account.port })
+    }
+    if (mode !== 'direct' && account.qcId.length > 0) {
+      const tunnel = await this.qcTunnel(account.qcId)
+      let qcList: QcEndpoint[]
+      if (objOf(tunnel['service']) != null) {
+        qcList = this.qcEndpointsFrom(tunnel, account.qcId)
+      } else {
+        qcList = this.qcEndpointsIntl(tunnel, account.qcId)
+      }
+      for (const c of qcList) {
+        cands.push(c)
+      }
+    }
+    if (cands.length === 0) {
+      throw new SynoError(-2, '请填写主机地址或 QuickConnect ID')
+    }
+    // lastGood 优先
+    const ordered: QcEndpoint[] = []
+    for (const c of cands) {
+      if (c.baseUrl === this.lastGood) ordered.push(c)
+    }
+    for (const c of cands) {
+      if (c.baseUrl !== this.lastGood) ordered.push(c)
+    }
+    let lastErr: any = null
+    for (const c of ordered) {
+      try {
+        if (!(await this.probeAlive(c.baseUrl))) {
+          lastErr = new SynoError(106, c.label + ' 不可达：' + c.baseUrl)
+          continue
+        }
+        this.baseUrl = c.baseUrl
+        this.account = account
+        await this.discoverAt(c.baseUrl)
+        await this.login(password, otp)
+        this.lastGood = c.baseUrl
+        this.lastGoodLabel = c.label
+        this.save()
+        return
+      } catch (e) {
+        lastErr = e
+        // 认证类错误（400+ 密码/OTP/权限）与端点无关，直接中止不再换通道
+        if (e instanceof SynoError && e.code >= 400) throw e
+      }
+    }
+    throw lastErr != null ? lastErr : new SynoError(-2, '所有连接方式均失败')
+    // #endif
+  }
+
+  /** 运行时通道切换：网络异常时尝试其他 QuickConnect 端点（App 原生端；Web 端由代理轮换） */
+  async switchTransport(): Promise<boolean> {
+    // #ifdef WEB
+    return false
+    // #endif
+    // #ifndef WEB
+    const acc = this.account
+    if (acc == null || acc.qcId.length === 0 || this._switching) return false
+    if (acc.transport === 'direct') return false
+    this._switching = true
+    try {
+      const tunnel = await this.qcTunnel(acc.qcId)
+      const list =
+        objOf(tunnel['service']) != null
+          ? this.qcEndpointsFrom(tunnel, acc.qcId)
+          : this.qcEndpointsIntl(tunnel, acc.qcId)
+      for (const c of list) {
+        if (c.baseUrl === this.baseUrl) continue
+        if (!(await this.probeAlive(c.baseUrl))) continue
+        this.baseUrl = c.baseUrl
+        this.lastGood = c.baseUrl
+        this.lastGoodLabel = c.label
+        if (this.sid.length > 0) {
+          await this.discoverAt(c.baseUrl)
+          this.save()
+        }
+        return true
+      }
+      return false
+    } finally {
+      this._switching = false
+    }
+    // #endif
+  }
+
+  /** API 表为空且已登录时自动重新发现 */
+  async ensureDiscovered() {
+    if (Object.keys(this.apiTable).length === 0 && this.sid.length > 0 && this.account != null) {
+      await this.discover(this.account)
+      this.save()
+    }
+  }
+
+  async listShares(): Promise<FileItem[]> {
+    // 实测 DSM 7.4：list_share 从 FileStation.Info 移到了 FileStation.List 下，list_root 已移除
+    await this.ensureDiscovered()
+    const attempts = [
+      { api: 'SYNO.FileStation.List', method: 'list_share' }, // DSM 7.4+
+      { api: 'SYNO.FileStation.Info', method: 'list_share' }, // 旧版 DSM 回退
+    ]
+    let lastErr: any = null
+    for (const t of attempts) {
+      if (this.apiTable[t.api] == null) continue
+      try {
+        const data = await this.call(t.api, t.method, { limit: 1000 }, 1)
+        const shares = (data['shares'] as any[]) ?? []
+        return shares.map((s: any): FileItem => {
+          const m = objOf(s) ?? {}
+          const path = strOf(m, 'path')
+          return { name: path.split('/').pop() ?? path, path: path, isDir: true, size: 0, modified: '' }
+        })
+      } catch (e) {
+        lastErr = e
+        if (e instanceof SynoError && (e.code === 103 || e.code === 102)) continue
+        throw e
+      }
+    }
+    throw lastErr ?? new SynoError(103, '无法列出共享文件夹：list_share 在当前 DSM 上不可用')
+  }
+
+  async listFiles(folderPath: string): Promise<FileItem[]> {
+    // 注意：必须显式用 version=1。DSM 的 List.list **version=2 会忽略 additional 参数**
+    // （返回的对象只有 path/name/isdir，没有 size/time），version=1 才正常返回。
+    const data = await this.call('SYNO.FileStation.List', 'list', {
+      folder_path: folderPath,
+      offset: 0,
+      limit: 500,
+      sort_by: 'name',
+      sort_direction: 'asc',
+      additional: 'size,time',
+    }, 1)
+    const files = (data['files'] as any[]) ?? []
+    return files.map((f: any): FileItem => {
+      const m = objOf(f) ?? {}
+      const add = objOf(m['additional']) ?? {}
+      const time = objOf(add['time'])
+      const path = strOf(m, 'path')
+      const mtime = time != null ? numOf(time, 'mtime') : 0
+      // 蒸汽模式 bytecode 下 JSON 数值的 typeof 可能不是 'number'，做宽容解析
+      const rawSize = add['size']
+      let size = 0
+      if (typeof rawSize === 'number') {
+        size = rawSize as number
+      } else if (rawSize != null) {
+        const n = parseFloat(rawSize.toString())
+        if (!isNaN(n)) size = n
+      }
+      return {
+        name: path.split('/').pop() ?? path,
+        path: path,
+        isDir: m['isdir'] === true,
+        size: size,
+        modified: formatDateTime(mtime * 1000),
+      }
+    })
+  }
+
+  downloadFileUrl(path: string): string {
+    return this.buildUrl('SYNO.FileStation.Download', 'download', { path: path, mode: 'open' }, 2)
+  }
+
+  /**
+   * 上传本地文件到 NAS 目录（SYNO.FileStation.Upload，multipart POST）
+   *
+   * 以下结论均为 DSM 7.4.1 实测（真机 App + NAS 本机 curl 双重验证）：
+   * 1) 会话只认 Cookie: id=<sid>；把 _sid 放 query 或 multipart 都会失败（401 / 119）
+   * 2) multipart 里必须带普通字段，若只有 file 一个字段服务端会挂住不响应
+   * 3) 保存名取 multipart 的 filename，formData.filename 不生效 → 必须按目标名准备本地文件
+   * 4) path 必须是已存在的共享文件夹（/home、/photo…），不存在的共享返回 408，
+   *    create_parents 只能创建共享内的子目录
+   * 5) uni.uploadFile 读取 filePath 需要 uni 沙盒内路径或 file:// 形式，裸 /data/... 读不到
+   *
+   * @param localPath 手机本地文件路径（chooseImage 的 tempFilePath / 插件导出的缓存文件）
+   * @param destFolder NAS 目标目录（如 /home、/photo/2026）
+   * @param fileName 保存到 NAS 的文件名（不含目录）
+   * @param onProgress 进度百分比回调
+   * @param onTask 任务对象回调（用于取消）
+   */
+  async uploadFile(
+    localPath: string,
+    destFolder: string,
+    fileName: string,
+    onProgress: (percent: number) => void,
+    onTask: (task: any) => void
+  ): Promise<void> {
+    await this.ensureDiscovered()
+    const e = this.entry('SYNO.FileStation.Upload')
+    const url = this.baseUrl + this.pathPrefix + '/' + e.path
+    const uploadPath = await this.prepareUploadFile(localPath, fileName)
+    // 只有真正复制出来的临时副本才需要清理，避免误删用户原文件
+    const isTemp = uploadPath !== localPath && uploadPath !== this.toFileUri(localPath)
+    try {
+      await this.postUpload(url, e.maxVersion, uploadPath, destFolder, onProgress, onTask)
+    } finally {
+      if (isTemp) {
+        this.cleanupUploadTemp(uploadPath)
+      }
+    }
+  }
+
+  /** 把待上传文件准备成「uni 可读 + 文件名正确」的本地路径 */
+  private prepareUploadFile(srcPath: string, fileName: string): Promise<string> {
+    return new Promise<string>((resolve) => {
+      let base = ''
+      try {
+        base = uni.env.USER_DATA_PATH
+      } catch (e) {
+        base = ''
+      }
+      if (base.length === 0 || fileName.length === 0) {
+        resolve(this.toFileUri(srcPath))
+        return
+      }
+      const dir = base + '/qh_upload'
+      const fsm = uni.getFileSystemManager()
+      const bare = srcPath.startsWith('file://') ? srcPath.substring(7) : srcPath
+      // 不同实现要求的 src 形式不同，两种都试
+      const srcs: Array<string> = bare === srcPath ? [srcPath] : [srcPath, bare]
+
+      const tryCopy = (target: string, onFail: () => void) => {
+        const step = (i: number) => {
+          if (i >= srcs.length) {
+            onFail()
+            return
+          }
+          try {
+            fsm.copyFile({
+              srcPath: srcs[i],
+              destPath: target,
+              success: () => {
+                resolve(target)
+              },
+              fail: () => {
+                step(i + 1)
+              },
+            } as any)
+          } catch (e) {
+            step(i + 1)
+          }
+        }
+        step(0)
+      }
+
+      // mkdir 在 Android 上偶发不生效（实测目录未创建导致 copyFile ENOENT），
+      // 建完必须回查，失败就回退到 USER_DATA_PATH 根目录
+      const copyWithFallback = () => {
+        try {
+          fsm.access({
+            path: dir,
+            success: () => {
+              tryCopy(dir + '/' + fileName, () => {
+                resolve(this.toFileUri(srcPath))
+              })
+            },
+            fail: () => {
+              tryCopy(base + '/' + fileName, () => {
+                resolve(this.toFileUri(srcPath))
+              })
+            },
+          } as any)
+        } catch (e) {
+          resolve(this.toFileUri(srcPath))
+        }
+      }
+
+      try {
+        fsm.mkdir({
+          dirPath: dir,
+          recursive: true,
+          complete: () => {
+            copyWithFallback()
+          },
+        } as any)
+      } catch (e) {
+        copyWithFallback()
+      }
+    })
+  }
+
+  /** 删除上传时创建的临时副本（仅限应用 files 目录下，绝不碰用户原文件） */
+  private cleanupUploadTemp(p: string) {
+    const bare = p.startsWith('file://') ? p.substring(7) : p
+    let base = ''
+    try {
+      base = uni.env.USER_DATA_PATH
+    } catch (e) {
+      base = ''
+    }
+    if (base.length === 0 || bare.indexOf(base) !== 0 || bare === base) return
+    try {
+      uni.getFileSystemManager().unlink({
+        filePath: bare,
+        fail: () => {
+          // 删不掉交给系统清理
+        },
+      } as any)
+    } catch (e) {
+      // 忽略
+    }
+  }
+
+  /** 裸绝对路径转 file:// 形式；已有 scheme 的原样返回 */
+  private toFileUri(p: string): string {
+    if (p.indexOf('://') >= 0) return p
+    if (p.startsWith('/')) return 'file://' + p
+    return p
+  }
+
+  /** 实际发起 multipart 上传 */
+  private postUpload(
+    url: string,
+    version: number,
+    filePath: string,
+    destFolder: string,
+    onProgress: (percent: number) => void,
+    onTask: (task: any) => void
+  ): Promise<void> {
+    const form: Record<string, any> = {
+      api: 'SYNO.FileStation.Upload',
+      version: String(version),
+      method: 'upload',
+      path: destFolder,
+      create_parents: 'true',
+      overwrite: 'true',
+    }
+    return new Promise<void>((resolve, reject) => {
+      let task: any = null
+      task = uni.uploadFile({
+        url: url,
+        filePath: filePath,
+        name: 'file',
+        // DSM 该接口只从 Cookie 读会话
+        header: { Cookie: 'id=' + this.sid } as any,
+        formData: form,
+        timeout: 600000,
+        success: (res: any) => {
+          const text = String(res.data ?? '')
+          let json: Record<string, any> | null = null
+          try {
+            json = JSON.parse(text) as Record<string, any>
+          } catch (err2) {
+            json = null
+          }
+          if (json == null) {
+            reject(new SynoError(100, '上传失败：响应不是 JSON（' + text.slice(0, 80) + '）'))
+            return
+          }
+          if (json['success'] === true) {
+            resolve()
+          } else {
+            reject(this.parseError(json, 'SYNO.FileStation.Upload'))
+          }
+        },
+        fail: (err: any) => {
+          reject(new SynoError(106, '上传失败：' + err.errMsg))
+        },
+        complete: () => {
+          task = null
+        },
+      } as any)
+      onTask(task)
+      task?.onProgressUpdate((p: any) => {
+        onProgress(p.progress)
+      })
+    })
+  }
+
+  async createFolder(folderPath: string, name: string) {
+    await this.call('SYNO.FileStation.CreateFolder', 'create', { folder_path: folderPath, name: name })
+  }
+
+  async deleteFiles(paths: string[]) {
+    await this.call('SYNO.FileStation.Delete', 'start', { path: paths, recursive: 'true' })
+  }
+
+  async createShareLink(path: string): Promise<string> {
+    const data = await this.call('SYNO.FileStation.Share', 'create', { path: path })
+    return strOf(data, 'link')
+  }
+
+  // ---------------- DownloadStation ----------------
+
+  get downloadStationAvailable(): boolean {
+    return this.apiTable['SYNO.DownloadStation.Task'] != null
+  }
+
+  async listTasks(): Promise<DownloadTask[]> {
+    const data = await this.call('SYNO.DownloadStation.Task', 'list', {
+      offset: 0,
+      limit: 200,
+      additional: '["detail","transfer"]',
+    })
+    const tasks = (data['tasks'] as any[]) ?? []
+    return tasks.map((t: any): DownloadTask => {
+      const m = objOf(t) ?? {}
+      const extra = objOf(m['additional']) ?? {}
+      const detail = objOf(extra['detail']) ?? {}
+      const transfer = objOf(extra['transfer']) ?? {}
+      return {
+        id: strOf(m, 'id'),
+        title: strOr(m, 'title', '未命名任务'),
+        status: strOf(m, 'status'),
+        size: typeof m['size'] === 'number' ? m['size'] : 0,
+        transferred: typeof transfer['size_downloaded'] === 'number' ? transfer['size_downloaded'] : 0,
+        speed: typeof transfer['speed_download'] === 'number' ? transfer['speed_download'] : 0,
+        progress: typeof detail['progress'] === 'number' ? detail['progress'] : 0,
+      }
+    })
+  }
+
+  async createTask(uris: string[]) {
+    await this.call('SYNO.DownloadStation.Task', 'create', { uri: uris })
+  }
+
+  async pauseTasks(ids: string[]) {
+    await this.call('SYNO.DownloadStation.Task', 'pause', { id: ids })
+  }
+
+  async resumeTasks(ids: string[]) {
+    await this.call('SYNO.DownloadStation.Task', 'resume', { id: ids })
+  }
+
+  async deleteTasks(ids: string[]) {
+    await this.call('SYNO.DownloadStation.Task', 'delete', { id: ids })
+  }
+
+  // ---------------- Synology Photos ----------------
+
+  private browseApi(shared: boolean): string {
+    return shared ? 'SYNO.FotoTeam.Browse.Item' : 'SYNO.Foto.Browse.Item'
+  }
+
+  async listPhotos(sharedSpace: boolean, offset: number, limit: number): Promise<PhotoListResult> {
+    // 注意：不要传 sort_by（DSM 7.4 会报 120 参数条件无效），使用服务器默认排序
+    const data = await this.call(this.browseApi(sharedSpace), 'list', {
+      offset: offset,
+      limit: limit,
+      additional: '["thumbnail"]',
+    })
+    const items = (data['list'] as any[]) ?? []
+    const total = typeof data['total'] === 'number' ? data['total'] : items.length
+    const result: PhotoListResult = { list: items.map(parsePhotoItem), total: total }
+    return result
+  }
+
+  /** 缩略图 URL（社区验证格式） */
+  thumbUrl(item: PhotoItem, sharedSpace: boolean, size: string): string {
+    const api = sharedSpace ? 'SYNO.FotoTeam.Thumbnail' : 'SYNO.Foto.Thumbnail'
+    const actual = this.apiTable[api] != null ? api : 'SYNO.Foto.Thumbnail'
+    return this.buildUrl(actual, 'get', {
+      mode: 'download',
+      id: item.unitId,
+      type: 'unit',
+      size: size,
+      cache_key: item.cacheKey,
+    }, 1)
+  }
+
+  photoDownloadUrl(item: PhotoItem, sharedSpace: boolean): string {
+    const api = sharedSpace ? 'SYNO.FotoTeam.Download' : 'SYNO.Foto.Download'
+    return this.buildUrl(api, 'download_photo', { unit_id: item.unitId }, 1)
+  }
+
+  /** 构建带 sid 的 GET URL */
+  buildUrl(api: string, method: string, params: Record<string, any>, version?: number): string {
+    const e = this.entry(api)
+    const p: Record<string, any> = {
+      api: api,
+      version: version ?? e.maxVersion,
+      method: method,
+      _sid: this.sid,
+      ...params,
+    }
+    return this.baseUrl + this.pathPrefix + '/' + e.path + '?' + encodeParams(p)
+  }
+}
+
+function parsePhotoItem(it: any): PhotoItem {
+  const m = objOf(it) ?? {}
+  const add = objOf(m['additional']) ?? {}
+  const thumb = objOf(add['thumbnail']) ?? {}
+  const timeSec = typeof m['time'] === 'number' ? m['time'] : 0
+  return {
+    unitId: typeof m['id'] === 'number' ? m['id'] : 0,
+    fileName: strOr(m, 'filename', '未知'),
+    takenTime: formatDate(timeSec * 1000),
+    cacheKey: strOf(thumb, 'cache_key'),
+    isVideo: strOf(m, 'type') === 'video',
+  }
+}
+
+/** 全局单例 */
+export const api = SynoApi.load()

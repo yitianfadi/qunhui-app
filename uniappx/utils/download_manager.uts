@@ -1,0 +1,371 @@
+// 全局下载队列：文件页 / 照片页提交任务，下载页统一展示进度
+// 队列串行执行（一次只跑一个任务），避免多任务抢带宽
+import { ref } from 'vue'
+import { formatSize } from './syno.uts'
+
+/** 任务状态：waiting 等待 / downloading 下载中 / done 已完成 / failed 失败 / canceled 已取消 */
+export type DlTask = {
+  id: string
+  name: string
+  nasPath: string
+  url: string
+  status: string
+  percent: number
+  sizeText: string
+  /** 实时速度文案，如 12.3 MB/s */
+  speedText: string
+  savedPath: string
+  error: string
+  timeText: string
+}
+
+/** 全局任务列表（跨页面共享，模板中直接遍历） */
+export const dlTaskList = ref<Array<DlTask>>([])
+
+let currentId = ''
+let currentTask: any = null
+let seq = 0
+
+function pad2(n: number): string {
+  return n < 10 ? '0' + n : '' + n
+}
+
+function timeNow(): string {
+  const d = new Date()
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+}
+
+/** 文件名安全化：去掉路径分隔符，避免写入子目录失败 */
+function safeFileName(n: string): string {
+  let s = n.split('/').join('_')
+  s = s.split('\\').join('_')
+  return s.length > 0 ? s : 'unnamed'
+}
+
+function findTask(id: string): DlTask | null {
+  const list = dlTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id === id) return list[i]
+  }
+  return null
+}
+
+/** 进行中任务数（等待 + 下载中） */
+export function dlActiveCount(): number {
+  let n = 0
+  const list = dlTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i].status
+    if (s === 'waiting' || s === 'downloading') {
+      n = n + 1
+    }
+  }
+  return n
+}
+
+/** 已完成任务数 */
+export function dlDoneCount(): number {
+  let n = 0
+  const list = dlTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].status === 'done') n = n + 1
+  }
+  return n
+}
+
+/** 应用持久目录（uni.env 在 Web 端不存在，用 try 兜底） */
+function ensureDir(dir: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false
+    const done = () => {
+      if (!settled) {
+        settled = true
+        resolve()
+      }
+    }
+    try {
+      uni.getFileSystemManager().mkdir({
+        dirPath: dir,
+        recursive: true,
+        // 目录已存在时会走 fail，这里统一 resolve 继续
+        success: done,
+        fail: done,
+        complete: done,
+      } as any)
+    } catch (e) {
+      done()
+    }
+  })
+}
+
+/** 判断路径是否存在（目录/文件均可） */
+function pathExists(p: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const done = (v: boolean) => {
+      if (!settled) {
+        settled = true
+        resolve(v)
+      }
+    }
+    try {
+      uni.getFileSystemManager().access({
+        path: p,
+        success: () => done(true),
+        fail: () => done(false),
+      } as any)
+    } catch (e) {
+      done(false)
+    }
+  })
+}
+
+/** 复制文件，失败返回 false（不抛异常，避免 Promise 悬住） */
+function copyFileSafe(src: string, dest: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const done = (v: boolean) => {
+      if (!settled) {
+        settled = true
+        resolve(v)
+      }
+    }
+    try {
+      uni.getFileSystemManager().copyFile({
+        srcPath: src,
+        destPath: dest,
+        success: () => done(true),
+        fail: () => done(false),
+      } as any)
+    } catch (e) {
+      done(false)
+    }
+  })
+}
+
+/**
+ * 确保下载目录可用，返回真正可写的目录。
+ * Android 上 mkdir 偶发不生效（实测 files/download 未创建导致 copyFile ENOENT），
+ * 因此建完必须回查，失败就回退到 USER_DATA_PATH 根目录。
+ */
+async function ensureDownloadDir(): Promise<string> {
+  let base = ''
+  try {
+    base = uni.env.USER_DATA_PATH
+  } catch (e) {
+    base = ''
+  }
+  if (base.length === 0) {
+    return '/'
+  }
+  const dir = base + '/download'
+  if (await pathExists(dir)) {
+    return dir
+  }
+  await ensureDir(dir)
+  if (await pathExists(dir)) {
+    return dir
+  }
+  // 回退：直接放应用 files 根目录（一定存在）
+  return base
+}
+
+/**
+ * 提交下载任务（App 端调用；Web 端由调用方走浏览器下载）
+ * @param url 完整下载地址（含 sid）
+ * @param name 文件名
+ * @param nasPath NAS 上的原始路径（仅用于记录）
+ * @param openInBrowser Web 端是否立即交给浏览器（批量备份时传 false，避免弹出大量标签页）
+ */
+export function startDownload(
+  url: string,
+  name: string,
+  nasPath: string,
+  openInBrowser: boolean = true
+): DlTask {
+  const list = dlTaskList.value
+  // 同一文件正在下载中则不重复提交
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].name === name && list[i].status === 'downloading') {
+      return list[i]
+    }
+  }
+  // #ifdef WEB
+  // Web 端无文件系统写入能力：在点击的同步链里直接交给浏览器，仅记录一条历史
+  if (openInBrowser) {
+    window.open(url, '_blank')
+  }
+  // #endif
+
+  seq = seq + 1
+  const t: DlTask = {
+    id: 'dl' + Date.now() + '_' + seq,
+    name: safeFileName(name),
+    nasPath: nasPath,
+    url: url,
+    status: 'waiting',
+    percent: 0,
+    sizeText: '等待中…',
+    speedText: '',
+    savedPath: '',
+    error: '',
+    timeText: timeNow(),
+  }
+
+  // #ifdef WEB
+  t.status = 'done'
+  t.percent = 100
+  t.sizeText = openInBrowser ? '已交给浏览器下载' : '批量备份请使用 App 端'
+  // #endif
+
+  // 新任务插到最前（列表最近的在上方）
+  const next: Array<DlTask> = [t]
+  dlTaskList.value = next.concat(list)
+  // #ifndef WEB
+  pump()
+  // #endif
+  return t
+}
+
+/** 取最靠后（最早提交）的等待任务开始下载 */
+function pump() {
+  if (currentId.length > 0) return
+  const list = dlTaskList.value
+  let nextId = ''
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].status === 'waiting') {
+      nextId = list[i].id
+      break
+    }
+  }
+  if (nextId.length === 0) return
+  const t = findTask(nextId)
+  if (t == null) return
+  runTask(t)
+}
+
+async function runTask(t: DlTask) {
+  currentId = t.id
+  t.status = 'downloading'
+  t.percent = 0
+  t.sizeText = '准备中…'
+  t.speedText = ''
+  const dir = await ensureDownloadDir()
+  const dest = dir + '/' + t.name
+  try {
+    const saved = await new Promise<string>((resolve, reject) => {
+      let task: any = null
+      // 速度采样（每 400ms 用增量字节数计算瞬时速度）
+      let lastBytes = 0
+      let lastMs = Date.now()
+      let lastSpeed = ''
+      task = uni.downloadFile({
+        url: t.url,
+        // 直接写入目标文件：省掉"临时文件 → copyFile"这一步，大文件不再在 100% 后卡住
+        filePath: dest,
+        timeout: 600000,
+        success: (res) => {
+          // 指定 filePath 后，res.tempFilePath 就是实际落盘路径
+          // （目录下有同名文件时平台会自动加 (1) 后缀，所以要以返回值为准）
+          const tmp = String(res.tempFilePath ?? '')
+          if (tmp.indexOf(dir) === 0) {
+            resolve(tmp)
+            return
+          }
+          // 个别平台忽略 filePath → 兜底复制临时文件；
+          // copyFile 在目标目录缺失时会抛异常，必须兜住，否则任务永远停在 100%
+          copyFileSafe(tmp, dest).then((ok: boolean) => {
+            resolve(ok || tmp.length === 0 ? dest : tmp)
+          })
+        },
+        fail: (err) => {
+          reject(new Error(err.errMsg))
+        },
+        complete: () => {
+          currentTask = null
+        },
+      })
+      currentTask = task
+      task?.onProgressUpdate((p: any) => {
+        if (t.status !== 'downloading') return
+        const now = Date.now()
+        const dt = now - lastMs
+        if (dt >= 400) {
+          const db = p.totalBytesWritten - lastBytes
+          lastSpeed = formatSize(db * 1000 / dt) + '/s'
+          lastBytes = p.totalBytesWritten
+          lastMs = now
+        }
+        t.percent = p.progress
+        t.speedText = lastSpeed
+        const head = lastSpeed.length > 0 ? lastSpeed + ' · ' : ''
+        t.sizeText = head + formatSize(p.totalBytesWritten) + ' / ' + formatSize(p.totalBytesExpectedToWrite)
+      })
+    })
+    t.savedPath = saved
+    t.status = 'done'
+    t.percent = 100
+  } catch (e) {
+    if (t.status !== 'canceled') {
+      t.status = 'failed'
+      t.error = e instanceof Error ? e.message : String(e)
+      t.sizeText = '下载失败'
+    }
+  } finally {
+    currentId = ''
+    currentTask = null
+    pump()
+  }
+}
+
+/** 取消任务（等待中直接标记，下载中中断网络请求） */
+export function cancelDlTask(id: string) {
+  const t = findTask(id)
+  if (t == null) return
+  if (t.status === 'downloading') {
+    t.status = 'canceled'
+    t.sizeText = '已取消'
+    if (currentTask != null) {
+      currentTask.abort()
+      currentTask = null
+    }
+  } else if (t.status === 'waiting') {
+    t.status = 'canceled'
+    t.sizeText = '已取消'
+  }
+}
+
+/** 从列表移除单条记录（不会删除磁盘文件） */
+export function removeDlTask(id: string) {
+  const list = dlTaskList.value
+  const next: Array<DlTask> = []
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id !== id) next.push(list[i])
+  }
+  dlTaskList.value = next
+}
+
+/** 清空所有已结束（完成/失败/取消）的记录 */
+export function clearFinishedDlTasks() {
+  const list = dlTaskList.value
+  const next: Array<DlTask> = []
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i].status
+    if (s === 'waiting' || s === 'downloading') next.push(list[i])
+  }
+  dlTaskList.value = next
+}
+
+/** 重试失败/取消的任务 */
+export function retryDlTask(id: string) {
+  const t = findTask(id)
+  if (t == null) return
+  if (t.status === 'failed' || t.status === 'canceled') {
+    t.status = 'waiting'
+    t.percent = 0
+    t.error = ''
+    t.sizeText = '等待中…'
+    t.savedPath = ''
+    pump()
+  }
+}

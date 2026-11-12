@@ -1,0 +1,268 @@
+<template>
+  <scroll-view class="page-bg" direction="vertical">
+    <view class="login-wrap">
+      <image class="logo" src="/static/logo_192.png" mode="aspectFit" />
+      <text class="title">连接你的群晖 NAS</text>
+
+      <!-- Web 端提示 -->
+      <!-- #ifdef WEB -->
+      <view class="web-tip">
+        <text class="web-tip-text">🌐 Web 版需通过本地代理连接：\ndart run tools/dev_proxy.dart &lt;NAS_IP&gt; &lt;NAS端口&gt; 8090\n主机已自动填好，直接输账号密码即可</text>
+      </view>
+      <!-- #endif -->
+
+      <text v-if="errorMsg.length > 0" class="text-error error-box">{{ errorMsg }}</text>
+
+      <!-- 连接模式 -->
+      <view class="field">
+        <text class="label">连接方式</text>
+        <view class="seg">
+          <text class="seg-item" :class="transport === 'auto' ? 'seg-active' : ''" @click="transport = 'auto'">自动切换</text>
+          <text class="seg-item" :class="transport === 'direct' ? 'seg-active' : ''" @click="transport = 'direct'">直连</text>
+          <text class="seg-item" :class="transport === 'quickconnect' ? 'seg-active' : ''" @click="transport = 'quickconnect'">QuickConnect</text>
+        </view>
+      </view>
+
+      <view class="field" v-if="transport !== 'direct'">
+        <text class="label">QuickConnect ID</text>
+        <input class="input" v-model="qcId" placeholder="在 DSM 控制面板-外部访问中查看" />
+      </view>
+      <view class="field" v-if="transport !== 'quickconnect'">
+        <text class="label">主机地址</text>
+        <input class="input" v-model="host" placeholder="192.168.1.10 或 DDNS 域名" />
+      </view>
+      <view class="field" v-if="transport !== 'quickconnect'">
+        <text class="label">端口</text>
+        <input class="input" v-model="port" placeholder="5000" />
+      </view>
+      <view class="field">
+        <text class="label">用户名</text>
+        <input class="input" v-model="username" placeholder=" DSM 用户名" />
+      </view>
+      <view class="field">
+        <text class="label">密码</text>
+        <input class="input" v-model="password" :password="true" placeholder="密码" />
+      </view>
+      <view class="field" v-if="showOtp === true">
+        <text class="label">两步验证码</text>
+        <input class="input" v-model="otp" placeholder="6 位验证码" />
+      </view>
+
+      <view class="btn-primary login-btn" @click="onLogin">
+        <text v-if="connecting === false" style="color:#ffffff;font-size:16px;">{{ showOtp === true ? '重新登录' : '登录' }}</text>
+        <text v-else style="color:#ffffff;">连接中…</text>
+      </view>
+
+      <view v-if="accounts.length > 0" class="card saved-box">
+        <text class="section-title">已保存账号</text>
+        <view v-for="(acc, index) in accounts" :key="index" class="saved-item" @click="applyAccount(acc)">
+          <text class="saved-name">{{ acc.name }}</text>
+          <text class="text-secondary">{{ acc.protocol }}://{{ acc.host }}:{{ acc.port }} · {{ acc.username }}</text>
+        </view>
+      </view>
+    </view>
+  </scroll-view>
+</template>
+
+<script setup>
+import { ref, onMounted } from 'vue'
+import { api, SynoError, NasAccount } from '@/utils/syno.uts'
+
+const host = ref('')
+const port = ref('5000')
+const qcId = ref('')
+const transport = ref('auto')
+const username = ref('')
+const password = ref('')
+const otp = ref('')
+const showOtp = ref(false)
+const connecting = ref(false)
+const errorMsg = ref('')
+const accounts = ref<Array<Record<string, any>>>(loadAccounts())
+
+// 已有有效会话时自动进入主页（刷新/重开应用不重复登录）
+onMounted(() => {
+  if (api.loggedIn) {
+    uni.reLaunch({ url: '/pages/home/home' })
+  }
+})
+
+function loadAccounts(): Array<Record<string, any>> {
+  const raw = uni.getStorageSync('nas_accounts') as string
+  if (raw != null && raw.length > 0) {
+    try {
+      return JSON.parse(raw) as Array<Record<string, any>>
+    } catch (e) {
+      return []
+    }
+  }
+  return []
+}
+
+function saveAccounts() {
+  uni.setStorageSync('nas_accounts', JSON.stringify(accounts.value))
+}
+
+// #ifdef WEB
+// Web 端预填当前页面地址（即本地代理）
+const loc = window.location as any
+if (loc.hostname != null) {
+  host.value = loc.hostname
+  port.value = loc.port != null && loc.port.length > 0 ? loc.port : '80'
+}
+// #endif
+
+function applyAccount(acc: Record<string, any>) {
+  host.value = acc['host'] as string
+  port.value = String(acc['port'])
+  username.value = acc['username'] as string
+  qcId.value = typeof acc['qcId'] === 'string' ? (acc['qcId'] as string) : ''
+  const t = typeof acc['transport'] === 'string' ? (acc['transport'] as string) : 'auto'
+  transport.value = t.length > 0 ? t : 'auto'
+}
+
+async function onLogin() {
+  const needHost = transport.value !== 'quickconnect'
+  if (needHost && host.value.length === 0 && qcId.value.length === 0) {
+    errorMsg.value = '请填写主机地址或 QuickConnect ID'
+    return
+  }
+  if (transport.value === 'quickconnect' && qcId.value.length === 0) {
+    errorMsg.value = '请填写 QuickConnect ID'
+    return
+  }
+  connecting.value = true
+  errorMsg.value = ''
+  try {
+    const portNum = parseInt(port.value)
+    const acc = {
+      id: host.value + ':' + username.value,
+      name: host.value.length > 0 ? host.value : qcId.value,
+      protocol: 'http',
+      host: host.value.trim(),
+      port: isNaN(portNum) ? 5000 : portNum,
+      username: username.value.trim(),
+      qcId: qcId.value.trim(),
+      transport: transport.value,
+    }
+    // 统一入口：按模式自动尝试 直连 → LAN → WAN → QuickConnect 中继，成功后记住可用通道
+    await api.connectAuto(acc as NasAccount, password.value, otp.value.trim())
+    // 保存账号列表
+    const exists = accounts.value.findIndex((a) => a['id'] === acc.id)
+    if (exists < 0) {
+      accounts.value.push(acc as Record<string, any>)
+      saveAccounts()
+    }
+    uni.reLaunch({ url: '/pages/home/home' })
+  } catch (e) {
+    if (e instanceof SynoError) {
+      errorMsg.value = e.message
+      if (e.code === 403 || e.code === 404) showOtp.value = true
+    } else {
+      errorMsg.value = '连接失败：' + String(e)
+    }
+  } finally {
+    connecting.value = false
+  }
+}
+</script>
+
+<style>
+  .page-bg {
+    flex: 1;
+    background-color: #f7f8fa;
+  }
+  .login-wrap {
+    padding: 40px 24px 24px 24px;
+    flex-direction: column;
+  }
+  .logo {
+    width: 88px;
+    height: 88px;
+    border-radius: 20px;
+    align-self: center;
+    box-shadow: 0 4px 16px rgba(30, 107, 184, 0.25);
+  }
+  .title {
+    font-size: 22px;
+    font-weight: bold;
+    /* app 端 text 宽度默认收缩到内容宽度，需显式撑满才会真正居中 */
+    width: 100%;
+    text-align: center;
+    margin: 12px 0 20px 0;
+    color: #222222;
+  }
+  .web-tip {
+    background-color: #e8f1fb;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+  }
+  .web-tip-text {
+    color: #1e6bb8;
+    font-size: 12px;
+    line-height: 20px;
+  }
+  .error-box {
+    background-color: #fdeceb;
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 14px;
+  }
+  .field {
+    margin-bottom: 12px;
+    flex-direction: column;
+  }
+  .seg {
+    flex-direction: row;
+    background-color: #eef1f5;
+    border-radius: 8px;
+    padding: 3px;
+  }
+  .seg-item {
+    flex: 1;
+    text-align: center;
+    font-size: 13px;
+    color: #666666;
+    padding: 7px 0;
+    border-radius: 6px;
+  }
+  .seg-active {
+    background-color: #ffffff;
+    color: #1e6bb8;
+    font-weight: bold;
+  }
+  .label {
+    font-size: 13px;
+    color: #666666;
+    margin-bottom: 6px;
+  }
+  .input {
+    height: 42px;
+    background-color: #ffffff;
+    border-radius: 8px;
+    padding: 0 12px;
+    border: 1px solid #e0e0e0;
+    font-size: 15px;
+  }
+  .login-btn {
+    margin-top: 20px;
+  }
+  .saved-box {
+    margin-top: 24px;
+  }
+  .section-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #444444;
+    margin-bottom: 8px;
+  }
+  .saved-item {
+    padding: 8px 0;
+    flex-direction: column;
+  }
+  .saved-name {
+    font-size: 15px;
+    color: #222222;
+  }
+</style>

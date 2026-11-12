@@ -1,0 +1,296 @@
+// 全局上传队列：手机 → NAS 备份（照片 / 文件）
+// 与下载队列一样串行执行，一次只传一个文件，避免多任务抢带宽
+import { ref } from 'vue'
+import { api, formatSize } from './syno.uts'
+import { deviceExportToCache, deviceRemoveFile } from './device_picker.uts'
+
+/** 状态：waiting 等待 / uploading 上传中 / done 已完成 / failed 失败 / canceled 已取消 */
+export type UpTask = {
+  id: string
+  name: string
+  localPath: string
+  destFolder: string
+  status: string
+  percent: number
+  sizeText: string
+  error: string
+  timeText: string
+  /** 来自系统文件选择器的 content:// 地址（非空时上传前先导出到缓存） */
+  contentUri: string
+}
+
+/** 批量入队的请求项（一次选几千个文件时，避免逐条插入造成的 O(n²) 开销） */
+export type UploadRequest = {
+  localPath: string
+  contentUri: string
+  name: string
+  destFolder: string
+}
+
+/** 全局上传任务列表（跨页面共享） */
+export const upTaskList = ref<Array<UpTask>>([])
+
+let currentId = ''
+let currentTask: any = null
+let seq = 0
+
+/**
+ * 待上传队列（FIFO，只存 id）
+ * 之前每次 pump 都从任务数组末尾倒扫，任务多时退化为 O(n²)；
+ * 改为显式队列后，每个任务只会被取一次。
+ */
+let pendingIds: Array<string> = []
+
+/** 单次可容纳的最大排队数（防止误选整个存储导致内存爆炸） */
+const MAX_PENDING = 100000
+
+function pad2(n: number): string {
+  return n < 10 ? '0' + n : '' + n
+}
+
+function timeNow(): string {
+  const d = new Date()
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+}
+
+function findTask(id: string): UpTask | null {
+  const list = upTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id === id) return list[i]
+  }
+  return null
+}
+
+/** 进行中任务数 */
+export function upActiveCount(): number {
+  let n = 0
+  const list = upTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i].status
+    if (s === 'waiting' || s === 'uploading') n = n + 1
+  }
+  return n
+}
+
+/** 已完成任务数 */
+export function upDoneCount(): number {
+  let n = 0
+  const list = upTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].status === 'done') n = n + 1
+  }
+  return n
+}
+
+/**
+ * 提交上传任务
+ * @param localPath 手机本地路径
+ * @param fileName 保存到 NAS 的文件名
+ * @param destFolder NAS 目标目录
+ */
+export function startUpload(localPath: string, fileName: string, destFolder: string): UpTask {
+  return createTask(localPath, '', fileName, destFolder)
+}
+
+/**
+ * 从系统文件选择器返回的 content:// 地址提交上传任务
+ * 上传时才导出到缓存，避免一次选中几百个文件把缓存塞满
+ */
+export function startUploadFromUri(uri: string, fileName: string, destFolder: string): UpTask {
+  return createTask('', uri, fileName, destFolder)
+}
+
+function createTask(localPath: string, contentUri: string, fileName: string, destFolder: string): UpTask {
+  seq = seq + 1
+  const t: UpTask = {
+    id: 'up' + Date.now() + '_' + seq,
+    name: fileName,
+    localPath: localPath,
+    destFolder: destFolder,
+    status: 'waiting',
+    percent: 0,
+    sizeText: '等待中…',
+    error: '',
+    timeText: timeNow(),
+    contentUri: contentUri,
+  }
+  const next: Array<UpTask> = [t]
+  upTaskList.value = next.concat(upTaskList.value)
+  if (pendingIds.length < MAX_PENDING) {
+    pendingIds.push(t.id)
+  }
+  pump()
+  return t
+}
+
+/**
+ * 批量入队（选中整个文件夹几千个文件时用）
+ * 只做一次数组拼接 + 一次 pump，避免逐条 createTask 的重复开销
+ * @returns 实际入队数量
+ */
+export function startUploadsBatch(reqs: Array<UploadRequest>): number {
+  if (reqs.length === 0) {
+    return 0
+  }
+  const created: Array<UpTask> = []
+  const batchTime = timeNow()
+  for (let i = 0; i < reqs.length; i++) {
+    const r = reqs[i]
+    if (created.length >= MAX_PENDING) {
+      break
+    }
+    seq = seq + 1
+    const t: UpTask = {
+      id: 'up' + Date.now() + '_' + seq,
+      name: r.name,
+      localPath: r.localPath,
+      destFolder: r.destFolder,
+      status: 'waiting',
+      percent: 0,
+      sizeText: '等待中…',
+      error: '',
+      timeText: batchTime,
+      contentUri: r.contentUri,
+    }
+    created.push(t)
+    pendingIds.push(t.id)
+  }
+  if (created.length > 0) {
+    // created 内保持原选中顺序，整体放到列表最前（最新的在最上）
+    upTaskList.value = created.concat(upTaskList.value)
+    pump()
+  }
+  return created.length
+}
+
+function pump() {
+  if (currentId.length > 0) return
+  while (pendingIds.length > 0) {
+    const id = pendingIds.shift()
+    if (id == null || id.length === 0) {
+      continue
+    }
+    const t = findTask(id)
+    if (t != null && t.status === 'waiting') {
+      runTask(t)
+      return
+    }
+  }
+}
+
+async function runTask(t: UpTask) {
+  currentId = t.id
+  t.status = 'uploading'
+  t.percent = 0
+  t.sizeText = '上传中…'
+  let uploadPath = t.localPath
+  let fromCache = false
+  try {
+    // content:// 来源：先导出到缓存再上传，上传结束即删除
+    // 注意这是「按需」导出：同一时刻磁盘上只有一个文件的副本，不会因为选了几千个就占满空间
+    if (t.contentUri.length > 0) {
+      t.sizeText = '准备文件…'
+      try {
+        uploadPath = await deviceExportToCache(t.contentUri, t.name)
+        fromCache = true
+      } catch (e) {
+        throw new Error('无法读取该文件（可能手机存储空间不足，或系统已回收访问权限，请重试）')
+      }
+      t.sizeText = '上传中…'
+    }
+    await api.uploadFile(
+      uploadPath,
+      t.destFolder,
+      t.name,
+      (percent: number) => {
+        if (t.status !== 'uploading') return
+        t.percent = percent
+        t.sizeText = '已上传 ' + percent + '%'
+      },
+      (task: any) => {
+        currentTask = task
+      }
+    )
+    t.status = 'done'
+    t.percent = 100
+    t.sizeText = '已保存到 ' + t.destFolder
+  } catch (e) {
+    if (t.status !== 'canceled') {
+      t.status = 'failed'
+      t.error = e instanceof Error ? e.message : String(e)
+      t.sizeText = '上传失败'
+    }
+  } finally {
+    if (fromCache) {
+      deviceRemoveFile(uploadPath)
+    }
+    currentId = ''
+    currentTask = null
+    pump()
+  }
+}
+
+/** 取消上传（等待中直接标记；上传中中断请求） */
+export function cancelUpTask(id: string) {
+  const t = findTask(id)
+  if (t == null) return
+  if (t.status === 'uploading') {
+    t.status = 'canceled'
+    t.sizeText = '已取消'
+    if (currentTask != null) {
+      currentTask.abort()
+      currentTask = null
+    }
+  } else if (t.status === 'waiting') {
+    t.status = 'canceled'
+    t.sizeText = '已取消'
+  }
+}
+
+export function removeUpTask(id: string) {
+  const list = upTaskList.value
+  const next: Array<UpTask> = []
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id !== id) next.push(list[i])
+  }
+  upTaskList.value = next
+}
+
+export function clearFinishedUpTasks() {
+  const list = upTaskList.value
+  const next: Array<UpTask> = []
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i].status
+    if (s === 'waiting' || s === 'uploading') next.push(list[i])
+  }
+  upTaskList.value = next
+}
+
+export function retryUpTask(id: string) {
+  const t = findTask(id)
+  if (t == null) return
+  if (t.status === 'failed' || t.status === 'canceled') {
+    t.status = 'waiting'
+    t.percent = 0
+    t.error = ''
+    t.sizeText = '等待中…'
+    if (pendingIds.indexOf(id) < 0) {
+      pendingIds.push(id)
+    }
+    pump()
+  }
+}
+
+/** 取消全部进行中与排队中的任务（批量上传时想中途停止用） */
+export function cancelAllUpTasks(): number {
+  const list = upTaskList.value
+  let n = 0
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.status === 'waiting' || t.status === 'uploading') {
+      cancelUpTask(t.id)
+      n = n + 1
+    }
+  }
+  return n
+}

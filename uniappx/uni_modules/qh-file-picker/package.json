@@ -1,0 +1,65 @@
+{
+	"id": "qh-file-picker",
+	"displayName": "qh-file-picker 文件与文件夹选择",
+	"version": "1.0.0",
+	"description": "Android 端选择任意文件或整个文件夹（基于系统 SAF），可递归扫描目录内容，并把 content:// 文件导出为本地路径用于上传",
+	"keywords": [
+		"文件选择",
+		"文件夹选择",
+		"目录选择",
+		"SAF",
+		"备份"
+	],
+	"repository": "",
+	"engines": {
+		"HBuilderX": "^4.0.0",
+		"uni-app": "^3.1.0",
+		"uni-app-x": "^3.1.0"
+	},
+	"dcloudext": {
+		"type": "uts",
+		"sale": {
+			"regular": {
+				"price": "0.00"
+			},
+			"sourcecode": {
+				"price": "0.00"
+			}
+		},
+		"contact": {
+			"qq": ""
+		},
+		"declaration": {
+			"ads": "",
+			"data": "仅在用户主动通过系统文件选择器授权后读取所选文件，不访问其他位置，不上传任何数据",
+			"permissions": "无（使用系统 SAF 授权机制，不需要存储权限）"
+		},
+		"npmurl": "",
+		"vapor": "√",
+		"darkmode": "-",
+		"i18n": "-",
+		"widescreen": "-"
+	},
+	"uni_modules": {
+		"dependencies": [],
+		"encrypt": [],
+		"platforms": {
+			"client": {
+				"uni-app-x": {
+					"app": {
+						"android": "√",
+						"ios": "-",
+						"harmony": "-"
+					},
+					"web": {
+						"safari": "-",
+						"chrome": "-"
+					},
+					"mp": {
+						"weixin": "-"
+					}
+				}
+			}
+		}
+	}
+}

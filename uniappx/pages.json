@@ -1,0 +1,34 @@
+{
+  "pages": [
+    {
+      "path": "pages/login/login",
+      "style": {
+        "navigationBarTitleText": "连接 NAS"
+      }
+    },
+    {
+      "path": "pages/home/home",
+      "style": {
+        "navigationBarTitleText": "群晖助手"
+      }
+    },
+    {
+      "path": "pages/downloads/downloads",
+      "style": {
+        "navigationBarTitleText": "下载管理"
+      }
+    },
+    {
+      "path": "pages/backup/backup",
+      "style": {
+        "navigationBarTitleText": "备份与恢复"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "群晖助手",
+    "navigationBarBackgroundColor": "#FFFFFF",
+    "backgroundColor": "#F7F8FA"
+  }
+}

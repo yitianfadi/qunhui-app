@@ -1,0 +1,194 @@
+<template>
+  <view class="dl-page">
+    <scroll-view class="dl-scroll" direction="vertical">
+      <text v-if="errorMsg.length > 0" class="text-error error-center">{{ errorMsg }}</text>
+      <text v-if="available === false && errorMsg.length === 0" class="text-error error-center">
+        NAS 未安装 Download Station 套件（套件中心可安装）
+      </text>
+
+      <view v-for="(t, index) in tasks" :key="index" class="task-card">
+        <view class="task-head">
+          <text class="task-title" max-lines="1">{{ t.title }}</text>
+          <text class="task-status">{{ downloadStatusText(t.status) }}</text>
+        </view>
+        <view class="progress-track">
+          <view class="progress-fill" :style="{ width: progressOf(t) + '%' }" />
+        </view>
+        <view class="task-foot">
+          <text class="text-secondary">{{ formatSize(t.transferred) }} / {{ formatSize(t.size) }}（{{ progressOf(t) }}%）</text>
+          <text v-if="t.speed > 0" class="text-secondary">{{ formatSize(t.speed) }}/s</text>
+        </view>
+        <view class="task-actions">
+          <text class="action-btn" @click="togglePause(t)">{{ t.status === 'paused' ? '▶ 恢复' : '⏸ 暂停' }}</text>
+          <text class="action-btn action-danger" @click="remove(t)">🗑 删除</text>
+        </view>
+      </view>
+
+      <view v-if="tasks.length === 0 && errorMsg.length === 0 && available === true" class="empty-box">
+        <text class="text-secondary">暂无下载任务</text>
+      </view>
+      <view class="bottom-space" />
+    </scroll-view>
+
+    <!-- 新建任务 -->
+    <view v-if="available === true" class="fab" @click="addTask">
+      <text class="fab-text">＋⬇️</text>
+    </view>
+  </view>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { api, formatSize, downloadStatusText, DownloadTask } from '@/utils/syno.uts'
+
+const tasks = ref<Array<DownloadTask>>([])
+const errorMsg = ref('')
+const available = ref(true)
+let timer = -1
+
+async function load() {
+  if (!api.downloadStationAvailable) {
+    available.value = false
+    return
+  }
+  try {
+    tasks.value = await api.listTasks()
+    errorMsg.value = ''
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function progressOf(t: DownloadTask): number {
+  if (t.size > 0) return Math.min(100, Math.floor((t.transferred / t.size) * 100))
+  return t.progress > 0 ? Math.min(100, t.progress) : 0
+}
+
+load()
+// 30 秒轮询刷新
+timer = setInterval(load, 30000) as any
+
+function togglePause(t: DownloadTask) {
+  const action = t.status === 'paused' ? api.resumeTasks([t.id]) : api.pauseTasks([t.id])
+  action.then(() => load()).catch((e) => {
+    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+  })
+}
+
+function remove(t: DownloadTask) {
+  uni.showModal({
+    title: '删除任务',
+    content: '确定删除 ' + t.title + '？',
+    success: (res) => {
+      if (res.confirm) {
+        api.deleteTasks([t.id]).then(() => load()).catch((e) => {
+          uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+        })
+      }
+    },
+  })
+}
+
+function addTask() {
+  uni.showModal({
+    title: '新建下载任务',
+    editable: true,
+    placeholderText: 'http(s)/ftp/magnet 链接',
+    success: (res) => {
+      if (res.confirm && res.content != null && res.content.length > 0) {
+        const uris = res.content.split(/\s+/).filter((l) => l.length > 0)
+        api.createTask(uris).then(() => load()).catch((e) => {
+          uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+        })
+      }
+    },
+  })
+}
+</script>
+
+<style>
+  .dl-page {
+    flex: 1;
+    flex-direction: column;
+  }
+  .dl-scroll {
+    flex: 1;
+  }
+  .task-card {
+    background-color: #ffffff;
+    border-radius: 8px;
+    margin: 6px 12px;
+    padding: 12px;
+    flex-direction: column;
+  }
+  .task-head {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .task-title {
+    font-size: 14px;
+    color: #222222;
+    flex: 1;
+  }
+  .task-status {
+    font-size: 11px;
+    color: #1e6bb8;
+    margin-left: 8px;
+  }
+  .progress-track {
+    height: 4px;
+    background-color: #eef2f7;
+    border-radius: 2px;
+    margin: 10px 0 6px 0;
+    flex-direction: row;
+  }
+  .progress-fill {
+    height: 4px;
+    background-color: #1e6bb8;
+    border-radius: 2px;
+  }
+  .task-foot {
+    flex-direction: row;
+    justify-content: space-between;
+  }
+  .task-actions {
+    flex-direction: row;
+    margin-top: 8px;
+  }
+  .action-btn {
+    font-size: 13px;
+    color: #1e6bb8;
+    margin-right: 24px;
+  }
+  .action-danger {
+    color: #d94838;
+  }
+  .error-center {
+    width: 100%;
+    text-align: center;
+    padding: 24px 12px;
+  }
+  .empty-box {
+    padding: 48px;
+    align-items: center;
+  }
+  .bottom-space {
+    height: 80px;
+  }
+  .fab {
+    position: fixed;
+    right: 20px;
+    bottom: 80px;
+    width: 52px;
+    height: 52px;
+    border-radius: 26px;
+    background-color: #1e6bb8;
+    align-items: center;
+    justify-content: center;
+  }
+  .fab-text {
+    font-size: 13px;
+    color: #ffffff;
+  }
+</style>
