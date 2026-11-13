@@ -143,6 +143,82 @@ function copyFileSafe(src: string, dest: string): Promise<boolean> {
   })
 }
 
+/** 任意值转数字（UTS 无 Number() 构造，按项目约定用 typeof + parseFloat） */
+function toNum(v: any, def: number): number {
+  if (v == null) return def
+  if (typeof v === 'number') return v as number
+  if (typeof v === 'string') {
+    const s = v as string
+    if (s.length === 0) return def
+    const n = parseFloat(s)
+    // NaN 时三个比较都不成立，回落默认值
+    if (n > 0 || n < 0 || n === 0) return n
+    return def
+  }
+  return def
+}
+
+/** 读取文件大小（字节）；文件不存在或读取失败返回 -1 */
+function fileSize(p: string): Promise<number> {
+  return new Promise<number>((resolve) => {
+    let settled = false
+    const done = (v: number) => {
+      if (!settled) {
+        settled = true
+        resolve(v)
+      }
+    }
+    try {
+      uni.getFileSystemManager().stat({
+        path: p,
+        recursive: false,
+        success: (res: any) => {
+          try {
+            const arr = res.stats as Array<any>
+            if (arr != null && arr.length > 0) {
+              const inner = arr[0]['stats']
+              if (inner != null) {
+                done(toNum(inner['size'], -1))
+                return
+              }
+            }
+          } catch (e) {
+            // 结构异常时统一按失败处理
+          }
+          done(-1)
+        },
+        fail: () => done(-1),
+        complete: () => {},
+      } as any)
+    } catch (e) {
+      done(-1)
+    }
+  })
+}
+
+/** 删除已存在的文件（不存在也算成功，不抛异常） */
+function removeFileIfExists(p: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false
+    const done = () => {
+      if (!settled) {
+        settled = true
+        resolve()
+      }
+    }
+    try {
+      uni.getFileSystemManager().unlink({
+        filePath: p,
+        success: done,
+        fail: done,
+        complete: done,
+      } as any)
+    } catch (e) {
+      done()
+    }
+  })
+}
+
 /**
  * 确保下载目录可用，返回真正可写的目录。
  * Android 上 mkdir 偶发不生效（实测 files/download 未创建导致 copyFile ENOENT），
@@ -252,59 +328,176 @@ async function runTask(t: DlTask) {
   t.speedText = ''
   const dir = await ensureDownloadDir()
   const dest = dir + '/' + t.name
+  // 同名旧文件先删掉：否则平台会自动改名成 name(1).ext，
+  // 后续按 dest 校验会拿到旧文件（或误判文件不存在）
+  await removeFileIfExists(dest)
+
+  let finished = false
+  let watchdog = 0
+  let guard = 0
+  let guardArmed = false
+
+  // 无效 id 下 clearTimeout 是空操作，直接无条件清
+  const clearTimers = () => {
+    clearTimeout(watchdog)
+    clearTimeout(guard)
+    watchdog = 0
+    guard = 0
+  }
+
   try {
-    const saved = await new Promise<string>((resolve, reject) => {
+    await new Promise<void>((resolveP) => {
       let task: any = null
       // 速度采样（每 400ms 用增量字节数计算瞬时速度）
       let lastBytes = 0
       let lastMs = Date.now()
       let lastSpeed = ''
-      task = uni.downloadFile({
-        url: t.url,
-        // 直接写入目标文件：省掉"临时文件 → copyFile"这一步，大文件不再在 100% 后卡住
-        filePath: dest,
-        timeout: 600000,
-        success: (res) => {
-          // 指定 filePath 后，res.tempFilePath 就是实际落盘路径
-          // （目录下有同名文件时平台会自动加 (1) 后缀，所以要以返回值为准）
-          const tmp = String(res.tempFilePath ?? '')
-          if (tmp.indexOf(dir) === 0) {
-            resolve(tmp)
+      // 最后一次有进度的时间，看门狗据此判断是否真的卡死
+      let lastActive = Date.now()
+
+      /** 收尾：写状态 + 结束 Promise（多次调用只生效一次） */
+      const finish = (ok: boolean, path: string, msg: string) => {
+        if (finished) return
+        finished = true
+        clearTimers()
+        if (ok) {
+          t.savedPath = path
+          t.status = 'done'
+          t.percent = 100
+        } else if (t.status !== 'canceled') {
+          t.status = 'failed'
+          t.error = msg
+          t.sizeText = '下载失败'
+        }
+        resolveP()
+      }
+
+      /**
+       * 进度到 100% 后主动确认文件真的落盘。
+       * 100% 只代表字节收完；success 回调在部分 Android 机型上会明显延后甚至不回调，
+       * 只依赖 success 会让任务永远停在"下载中 100%"。
+       */
+      const confirmSaved = (round: number, prevSize: number) => {
+        fileSize(dest).then((sz: number) => {
+          if (finished) return
+          // 连续两次采样大小一致才算写完（避免文件仍在增长时误判完成）
+          if (sz > 0 && sz === prevSize) {
+            finish(true, dest, '')
             return
           }
-          // 个别平台忽略 filePath → 兜底复制临时文件；
-          // copyFile 在目标目录缺失时会抛异常，必须兜住，否则任务永远停在 100%
+          if (round >= 12) {
+            if (sz > 0) {
+              finish(true, dest, '')
+            } else {
+              finish(false, '', '已下载到 100% 但文件未落盘，请检查存储空间或权限')
+            }
+            return
+          }
+          guard = setTimeout(() => {
+            confirmSaved(round + 1, sz)
+          }, 500) as any
+        })
+      }
+
+      // 看门狗：超过 120 秒没有任何进度推进 → 判失败，避免长期挂在"下载中"
+      const armWatchdog = () => {
+        watchdog = setTimeout(() => {
+          if (finished) return
+          if (Date.now() - lastActive > 120000) {
+            if (task != null) {
+              try {
+                task.abort()
+              } catch (e) {
+                // 原生任务可能已被释放
+              }
+            }
+            finish(false, '', '下载无响应（120 秒无进度），请检查网络后重试')
+            return
+          }
+          armWatchdog()
+        }, 5000) as any
+      }
+      armWatchdog()
+
+      task = uni.downloadFile({
+        url: t.url,
+        // 注意：不要传 filePath 指向 uni.env.USER_DATA_PATH 下的路径。
+        // 实测（DSM 7.4 + uni-app x 5.34 / Android）：传内部存储路径时原生层
+        // open 目标文件报 FileNotFoundException ENOENT，且 success/fail 都不回调，
+        // 任务就永远停在 100%（日志：files/download/xxx.jpg: open failed: ENOENT）。
+        // 改为让平台写自己默认可写的缓存目录，成功后再复制到下载目录。
+        timeout: 600000,
+        success: (res: any) => {
+          if (finished) return
+          const code = toNum(res.statusCode, 0)
+          // 非 2xx 说明拿到的是错误页（sid 失效时 DSM 会返回 HTML/JSON 错误）
+          if (code > 0 && (code < 200 || code >= 300)) {
+            finish(false, '', '服务器返回 HTTP ' + code + '（登录可能已失效）')
+            return
+          }
+          const tmp = String(res.tempFilePath ?? '')
+          if (tmp.length === 0) {
+            finish(false, '', '下载已结束但没有拿到临时文件')
+            return
+          }
+          // 平台若已落到目标目录（例如同名后缀处理），直接用
+          if (tmp.indexOf(dir) === 0) {
+            finish(true, tmp, '')
+            return
+          }
+          // 复制到下载目录；失败仍保留临时文件路径，至少能打开
           copyFileSafe(tmp, dest).then((ok: boolean) => {
-            resolve(ok || tmp.length === 0 ? dest : tmp)
+            if (finished) return
+            finish(true, ok ? dest : tmp, '')
           })
         },
-        fail: (err) => {
-          reject(new Error(err.errMsg))
+        fail: (err: any) => {
+          if (finished) return
+          // err 可能为 null，直接取 err.errMsg 会抛异常并把 Promise 悬死
+          let msg = '下载失败'
+          try {
+            if (err != null) {
+              const m = String(err.errMsg ?? '')
+              if (m.length > 0) msg = m
+            }
+          } catch (e) {
+            // 保持默认文案
+          }
+          finish(false, '', msg)
         },
         complete: () => {
           currentTask = null
         },
       })
       currentTask = task
+
       task?.onProgressUpdate((p: any) => {
-        if (t.status !== 'downloading') return
+        if (finished) return
+        lastActive = Date.now()
+        const written = toNum(p.totalBytesWritten, 0)
+        const expected = toNum(p.totalBytesExpectedToWrite, 0)
         const now = Date.now()
         const dt = now - lastMs
         if (dt >= 400) {
-          const db = p.totalBytesWritten - lastBytes
+          const db = written - lastBytes
           lastSpeed = formatSize(db * 1000 / dt) + '/s'
-          lastBytes = p.totalBytesWritten
+          lastBytes = written
           lastMs = now
         }
-        t.percent = p.progress
+        const pct = toNum(p.progress, 0)
+        t.percent = pct
         t.speedText = lastSpeed
         const head = lastSpeed.length > 0 ? lastSpeed + ' · ' : ''
-        t.sizeText = head + formatSize(p.totalBytesWritten) + ' / ' + formatSize(p.totalBytesExpectedToWrite)
+        t.sizeText = head + formatSize(written) + ' / ' + formatSize(expected)
+        // 字节收完 → 主动确认落盘，不等 success 回调
+        if (pct >= 100 && !guardArmed) {
+          guardArmed = true
+          guard = setTimeout(() => {
+            confirmSaved(0, -1)
+          }, 600) as any
+        }
       })
     })
-    t.savedPath = saved
-    t.status = 'done'
-    t.percent = 100
   } catch (e) {
     if (t.status !== 'canceled') {
       t.status = 'failed'
@@ -312,6 +505,8 @@ async function runTask(t: DlTask) {
       t.sizeText = '下载失败'
     }
   } finally {
+    finished = true
+    clearTimers()
     currentId = ''
     currentTask = null
     pump()

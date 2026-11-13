@@ -2,8 +2,8 @@
 	"name": "群晖助手",
 	"appid": "__UNI__BCED876",
 	"description": "群晖 DSM 客户端：文件管理、照片相册、下载管理",
-	"versionName": "1.0.1",
-	"versionCode": "101",
+	"versionName": "1.0.3",
+	"versionCode": "103",
 	"uni-app-x": {
 		"vapor": true,
 		"vapor-render-target": "bytecode",
@@ -37,7 +37,8 @@
 			"targetSdkVersion": 35,
 			"abiFilters": [
 				"arm64-v8a",
-				"armeabi-v7a"
+				"armeabi-v7a",
+				"x86_64"
 			],
 			"icons": {
 				"hdpi": "static/logo_72.png",

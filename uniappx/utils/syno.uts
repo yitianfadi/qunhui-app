@@ -946,16 +946,45 @@ export class SynoApi {
     await this.ensureDiscovered()
     const e = this.entry('SYNO.FileStation.Upload')
     const url = this.baseUrl + this.pathPrefix + '/' + e.path
-    const uploadPath = await this.prepareUploadFile(localPath, fileName)
-    // 只有真正复制出来的临时副本才需要清理，避免误删用户原文件
-    const isTemp = uploadPath !== localPath && uploadPath !== this.toFileUri(localPath)
+    // 不再做「复制到 qh_upload」这一步：现在自己拼 multipart，文件名由报文里的
+    // filename 决定，直接读源文件即可。复制反而会在路径解析上多踩一次坑
+    // （uni-app x 的 FileSystemManager 把裸 /data/... 当相对路径拼到 www 下）。
+    const uploadPath = this.toUniFsPath(localPath)
+    await this.postUpload(url, e.maxVersion, uploadPath, destFolder, onProgress, onTask, fileName)
+  }
+
+  /**
+   * 把系统绝对路径转成 uni-app x 的沙盒协议路径。
+   *
+   * uni-app x 4.71+ 用 unifile:// 表示沙盒路径；直接传 `/data/user/0/<pkg>/...`
+   * 会被当成相对路径拼到应用资源目录（www）下，导致 ENOENT
+   * （实测报错：.../apps/__UNI__BCED876/www/data/user/0/<pkg>/cache/qh_pick/ui.xml）。
+   */
+  private toUniFsPath(p: string): string {
+    if (p.startsWith('unifile://')) return p
+    if (p.indexOf('://') >= 0) return p // content:// 等交给上层
+    let usr = ''
+    let cache = ''
     try {
-      await this.postUpload(url, e.maxVersion, uploadPath, destFolder, onProgress, onTask)
-    } finally {
-      if (isTemp) {
-        this.cleanupUploadTemp(uploadPath)
-      }
+      usr = uni.env.USER_DATA_PATH
+      cache = uni.env.CACHE_PATH
+    } catch (e) {
+      return p
     }
+    if (usr.length > 0 && (p === usr || p.startsWith(usr + '/'))) {
+      return 'unifile://usr' + p.substring(usr.length)
+    }
+    if (cache.length > 0 && (p === cache || p.startsWith(cache + '/'))) {
+      return 'unifile://cache' + p.substring(cache.length)
+    }
+    // /data/data/<pkg> 与 /data/user/0/<pkg> 互为软链，统一按后缀判断
+    const cacheMark = '/cache/'
+    const filesMark = '/files/'
+    const ci = p.indexOf(cacheMark)
+    if (ci > 0) return 'unifile://cache' + p.substring(ci + cacheMark.length - 1)
+    const fi = p.indexOf(filesMark)
+    if (fi > 0) return 'unifile://usr' + p.substring(fi + filesMark.length - 1)
+    return p
   }
 
   /** 把待上传文件准备成「uni 可读 + 文件名正确」的本地路径 */
@@ -1066,62 +1095,151 @@ export class SynoApi {
     return p
   }
 
-  /** 实际发起 multipart 上传 */
+  /**
+   * 实际发起 multipart 上传。
+   *
+   * 为什么不用 uni.uploadFile：
+   * 实测这台 DSM（7.4）的 SYNO.FileStation.Upload 对 multipart 的**分段顺序敏感**——
+   * 文件段必须排在最后，文件段在前会直接返回 `{"error":{"code":101}}`（参数无效）。
+   * uni.uploadFile 固定把文件段放在前面，无法调整，因此这里自己拼报文，
+   * 用 uni.request + ArrayBuffer 发送（参数段在前，文件段最后）。
+   *
+   * 另外两点实测结论：
+   * - api/version/method 不能只放 URL query（服务端不响应），必须放在 multipart 段里；
+   * - URL query 里只带 `_sid`。
+   */
   private postUpload(
     url: string,
     version: number,
     filePath: string,
     destFolder: string,
     onProgress: (percent: number) => void,
-    onTask: (task: any) => void
+    onTask: (task: any) => void,
+    fileName: string
   ): Promise<void> {
-    const form: Record<string, any> = {
-      api: 'SYNO.FileStation.Upload',
-      version: String(version),
-      method: 'upload',
-      path: destFolder,
-      create_parents: 'true',
-      overwrite: 'true',
-    }
+    const bare = filePath.startsWith('file://') ? filePath.substring(7) : filePath
+    let name = fileName.length > 0 ? fileName : (bare.split('/').pop() ?? 'file')
+    if (name.length === 0) name = 'file'
+    name = name.replace(/"/g, '')
+    // minVersion 是 2；v3 未见额外要求，统一用 2 更稳
+    const ver = version >= 2 ? 2 : version
+    const sep = url.indexOf('?') >= 0 ? '&' : '?'
+    const fullUrl = url + sep + '_sid=' + encodeURIComponent(this.sid)
+
     return new Promise<void>((resolve, reject) => {
-      let task: any = null
-      task = uni.uploadFile({
-        url: url,
-        filePath: filePath,
-        name: 'file',
-        // DSM 该接口只从 Cookie 读会话
-        header: { Cookie: 'id=' + this.sid } as any,
-        formData: form,
-        timeout: 600000,
+      onProgress(5)
+      uni.getFileSystemManager().readFile({
+        filePath: bare,
         success: (res: any) => {
-          const text = String(res.data ?? '')
-          let json: Record<string, any> | null = null
-          try {
-            json = JSON.parse(text) as Record<string, any>
-          } catch (err2) {
-            json = null
-          }
-          if (json == null) {
-            reject(new SynoError(100, '上传失败：响应不是 JSON（' + text.slice(0, 80) + '）'))
+          const raw: any = res.data
+          if (raw == null || typeof raw == 'string') {
+            reject(new SynoError(101, '上传失败：读取不到文件内容'))
             return
           }
-          if (json['success'] === true) {
-            resolve()
-          } else {
-            reject(this.parseError(json, 'SYNO.FileStation.Upload'))
+          const fileBuf = raw as ArrayBuffer
+          try {
+            const boundary = '----QunhuiBoundary' + Date.now().toString()
+            const enc = new TextEncoder()
+            const fields: Array<Array<string>> = [
+              ['api', 'SYNO.FileStation.Upload'],
+              ['version', ver.toString()],
+              ['method', 'upload'],
+              ['path', destFolder],
+              ['create_parents', 'true'],
+              ['overwrite', 'true'],
+            ]
+            let head = ''
+            for (let i = 0; i < fields.length; i++) {
+              const f = fields[i]
+              head += '--' + boundary + '\r\n'
+              head += 'Content-Disposition: form-data; name="' + f[0] + '"\r\n\r\n'
+              head += f[1] + '\r\n'
+            }
+            head += '--' + boundary + '\r\n'
+            head += 'Content-Disposition: form-data; name="file"; filename="' + name + '"\r\n'
+            head += 'Content-Type: application/octet-stream\r\n\r\n'
+            const tail = '\r\n--' + boundary + '--\r\n'
+
+            const headBytes = enc.encode(head)
+            const tailBytes = enc.encode(tail)
+            const fileBytes = new Uint8Array(fileBuf)
+            const total = new Uint8Array(headBytes.length + fileBytes.length + tailBytes.length)
+            let p = 0
+            for (let i = 0; i < headBytes.length; i++) {
+              total[p] = headBytes[i]
+              p++
+            }
+            for (let i = 0; i < fileBytes.length; i++) {
+              total[p] = fileBytes[i]
+              p++
+            }
+            for (let i = 0; i < tailBytes.length; i++) {
+              total[p] = tailBytes[i]
+              p++
+            }
+            onProgress(30)
+
+            let task: any = null
+            task = uni.request({
+              url: fullUrl,
+              method: 'POST',
+              header: {
+                'Content-Type': 'multipart/form-data; boundary=' + boundary,
+                Cookie: 'id=' + this.sid,
+              } as any,
+              data: total.buffer as any,
+              dataType: 'text',
+              responseType: 'text',
+              timeout: 600000,
+              success: (res2: any) => {
+                // 注意：dataType 在 Android 上不生效，uni.request 会自动把 JSON
+                // 响应解析成对象。所以 res.data 既可能是字符串，也可能已经是对象，
+                // 两种都要处理（否则 String(对象) 会变成 "[object Object]"）。
+                const raw2: any = res2.data
+                let json: Record<string, any> | null = null
+                let text = ''
+                if (raw2 != null) {
+                  if (typeof raw2 == 'string') {
+                    text = raw2 as string
+                    try {
+                      json = JSON.parse(text) as Record<string, any>
+                    } catch (err2) {
+                      json = null
+                    }
+                  } else {
+                    json = raw2 as Record<string, any>
+                    text = JSON.stringify(raw2) ?? ''
+                  }
+                }
+                if (json == null) {
+                  reject(new SynoError(100, '上传失败：响应不是 JSON（' + text.slice(0, 80) + '）'))
+                  return
+                }
+                if (json['success'] === true) {
+                  onProgress(100)
+                  resolve()
+                } else {
+                  reject(this.parseError(json, 'SYNO.FileStation.Upload'))
+                }
+              },
+              fail: (err: any) => {
+                const msg = err != null && err.errMsg != null ? String(err.errMsg) : '网络异常'
+                reject(new SynoError(106, '上传失败：' + msg))
+              },
+              complete: () => {
+                task = null
+              },
+            } as any)
+            onTask(task)
+          } catch (e) {
+            reject(new SynoError(101, '上传失败：' + (e instanceof Error ? e.message : String(e))))
           }
         },
-        fail: (err: any) => {
-          reject(new SynoError(106, '上传失败：' + err.errMsg))
-        },
-        complete: () => {
-          task = null
+        fail: (e: any) => {
+          const msg = e != null && e.errMsg != null ? String(e.errMsg) : '未知错误'
+          reject(new SynoError(101, '上传失败：读不到本地文件（' + msg + '）'))
         },
       } as any)
-      onTask(task)
-      task?.onProgressUpdate((p: any) => {
-        onProgress(p.progress)
-      })
     })
   }
 
