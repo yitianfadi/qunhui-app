@@ -125,6 +125,11 @@ dart run tools/dev_proxy.dart <NAS_IP> <NAS端口> 8091 uniappx/unpackage/dist/b
 
 密码不落仓库：写到项目根目录 `_pw.tmp` / `_nas_pass.tmp`（已在 `.gitignore` 中忽略）。
 
+上传相关还有两个诊断脚本：
+
+- `node tools/try_upload.js <本地文件> <NAS文件名> [目录]`：用与客户端等价的自拼 multipart 直连 NAS 上传（需 `NAS_SID` 环境变量），用于确认「客户端问题」还是「服务端限制」；
+- `node tools/mock_dsm.js [端口]`：本地假 DSM，会打印 multipart 各字段的实际顺序与请求头，可在没有真实 NAS 时隔离验证客户端行为。
+
 ## 联调沉淀的关键经验（真机验证于 DSM 7.4）
 
 - **FileStation 系 API 是 `requestFormat: "JSON"`**：GET 调用会返回 Synology HTML 错误页（11939 字节），必须 **POST + JSON body**。客户端已实现 GET→POST-JSON→POST-form 三级回退；
@@ -137,7 +142,9 @@ dart run tools/dev_proxy.dart <NAS_IP> <NAS端口> 8091 uniappx/unpackage/dist/b
   2. **multipart 里必须带普通字段**（api/version/method/path/create_parents/overwrite），若只有 `file` 一个字段，服务端会挂住不响应（HTTP 无返回）；
   3. **保存名取 multipart 的 filename**，`formData.filename` 不生效 → 上传前必须把本地文件按目标文件名准备好；
 - **Upload 的 `path` 必须是已存在的共享文件夹**（如 `/home`、`/photo`）：不存在的共享返回 **408**，`create_parents` 只能创建共享内的子目录，不能创建共享本身。注意 `/home` 是"我的 home"别名，`/home/xxx` 会多一层目录，正确写法是 `/home`（本目录）或 `/homes/<用户>/...`；
-- **`uni.uploadFile` 的 filePath 需要 uni 沙盒内路径或 `file://` 形式**：裸的 `/data/data/...` 会抛 `java.io.FileNotFoundException`，客户端已统一先复制到 `USER_DATA_PATH/qh_upload/<目标文件名>` 再上传；
+- **`uni.uploadFile` 的 `filePath` 只认 `file://` 形式**：`unifile://` 沙盒协议它不认，会被当成相对路径拼到 `apps/__UNI__xxx/www/` 下，报 `FileNotFoundException`（日志里能看到 `.../www/data/user/0/...` 这样的路径）。客户端按 `file://` → 裸绝对路径 → `unifile://` 的顺序逐个尝试，哪个成功用哪个；
+- **大文件（视频）必须走原生流式上传**：`uni.getFileSystemManager().readFile` 会把整个文件读进内存，且受单文件大小上限约束，几百 MB 的视频必然失败并报 `The maximum size of the file storage limit is exceeded`（错误码 1300202，界面上表现为「上传失败：读不到本地文件（The maximum size of ...）」）。因此上传默认走 `uni.uploadFile`（OkHttp 流式，内存占用与文件大小无关），只有它返回 101（参数顺序不符）时才回退到「自己拼 multipart + readFile」的老路径；
+- **上传完成后的临时文件要用 `unifile://` 才能删掉**：`unlink` 同样不认裸绝对路径，`deviceRemoveFile` 已统一转换，否则 `cache/qh_pick` 会一直堆着上传过的副本；
 - HBuilderX 启动会调用 `wmic.exe`，若被安全软件/沙箱拦截会导致启动即崩；
 - **正式包必须自带 `AndroidManifest.xml` 才能用 HTTP**：Android 9+（targetSdk≥28）默认禁止明文 HTTP，**自定义调试基座由 HBuilderX 自动注入 `usesCleartextTraffic=true`，而云打包的正式包不会** —— 表现为 `request system error`（日志里 `NetworkSecurityConfig: No Network Security Config specified`），所有接口全挂。解决：在**项目根目录**（`uniappx/AndroidManifest.xml`，不是 nativeResources 下）放清单文件并在 `<application>` 上声明 `android:usesCleartextTraffic="true"`；
 - 本地安全审批：包含明文密码的命令可能被拦截，密码建议用环境变量分段传入。

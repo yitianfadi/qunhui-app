@@ -239,7 +239,7 @@ export function deviceRemoveFile(path: string) {
   }
   try {
     uni.getFileSystemManager().unlink({
-      filePath: path,
+      filePath: toUniFsPath(path),
       fail: () => {
         // 缓存文件删不掉不影响功能，交给系统清理
       },
@@ -247,4 +247,34 @@ export function deviceRemoveFile(path: string) {
   } catch (e) {
     // 忽略
   }
+}
+
+/**
+ * 绝对路径 → uni-app x 的沙盒协议路径。
+ *
+ * FileSystemManager 把裸 `/data/user/0/<pkg>/...` 当成相对路径拼到 www 下
+ * （实测 unlink/copyFile/readFile 都会因此 ENOENT），必须换成 unifile:// 协议。
+ */
+export function toUniFsPath(p: string): string {
+  if (p.startsWith('unifile://')) return p
+  if (p.indexOf('://') >= 0) return p
+  let cache = ''
+  let usr = ''
+  try {
+    cache = uni.env.CACHE_PATH
+    usr = uni.env.USER_DATA_PATH
+  } catch (e) {
+    return p
+  }
+  if (cache.length > 0 && (p == cache || p.startsWith(cache + '/'))) {
+    return 'unifile://cache' + p.substring(cache.length)
+  }
+  if (usr.length > 0 && (p == usr || p.startsWith(usr + '/'))) {
+    return 'unifile://usr' + p.substring(usr.length)
+  }
+  const ci = p.indexOf('/cache/')
+  if (ci > 0) return 'unifile://cache' + p.substring(ci + 6)
+  const fi = p.indexOf('/files/')
+  if (fi > 0) return 'unifile://usr' + p.substring(fi + 6)
+  return p
 }

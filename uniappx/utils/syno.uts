@@ -946,11 +946,24 @@ export class SynoApi {
     await this.ensureDiscovered()
     const e = this.entry('SYNO.FileStation.Upload')
     const url = this.baseUrl + this.pathPrefix + '/' + e.path
-    // 不再做「复制到 qh_upload」这一步：现在自己拼 multipart，文件名由报文里的
-    // filename 决定，直接读源文件即可。复制反而会在路径解析上多踩一次坑
-    // （uni-app x 的 FileSystemManager 把裸 /data/... 当相对路径拼到 www 下）。
+    // 不做「复制到 qh_upload」这一步：文件名由报文里的 filename 决定，直接读源文件即可。
+    // 复制反而会在路径解析上多踩一次坑（FileSystemManager 把裸 /data/... 当相对路径拼到 www 下）。
     const uploadPath = this.toUniFsPath(localPath)
-    await this.postUpload(url, e.maxVersion, uploadPath, destFolder, onProgress, onTask, fileName)
+    const barePath = localPath.startsWith('file://') ? localPath.substring(7) : localPath
+    // 优先原生流式上传：内存占用与文件大小无关，几百 MB 的视频也能传
+    // （自拼报文要先 readFile 整个文件，受单文件读取上限约束，大视频必然失败）
+    try {
+      await this.postUploadNative(url, e.maxVersion, uploadPath, barePath, destFolder, onProgress, onTask, fileName)
+      return
+    } catch (err) {
+      // 101 = 参数无效：万一某个基座把文件段排在参数段之前，DSM 会拒绝。
+      // 这时回退到「自己拼 multipart」的老路径（受 readFile 大小上限约束，只适合小文件）。
+      const isOrderIssue = err instanceof SynoError && (err as SynoError).code === 101
+      if (!isOrderIssue) {
+        throw err
+      }
+      await this.postUpload(url, e.maxVersion, uploadPath, destFolder, onProgress, onTask, fileName)
+    }
   }
 
   /**
@@ -1096,18 +1109,159 @@ export class SynoApi {
   }
 
   /**
-   * 实际发起 multipart 上传。
+   * 原生流式上传（uni.uploadFile）。
    *
-   * 为什么不用 uni.uploadFile：
-   * 实测这台 DSM（7.4）的 SYNO.FileStation.Upload 对 multipart 的**分段顺序敏感**——
-   * 文件段必须排在最后，文件段在前会直接返回 `{"error":{"code":101}}`（参数无效）。
-   * uni.uploadFile 固定把文件段放在前面，无法调整，因此这里自己拼报文，
-   * 用 uni.request + ArrayBuffer 发送（参数段在前，文件段最后）。
+   * 为什么不自己 readFile 拼报文（见下面的 postUpload）：
+   * readFile 会把整个文件读进内存，且受 FileSystemManager 单文件大小上限约束，
+   * 视频这种几百 MB 的文件必然触发
+   * `The maximum size of the file storage limit is exceeded`（错误码 1300202）。
+   * uni.uploadFile 由原生层边读边发，内存占用与文件大小无关，还自带进度与中断。
    *
-   * 另外两点实测结论：
-   * - api/version/method 不能只放 URL query（服务端不响应），必须放在 multipart 段里；
-   * - URL query 里只带 `_sid`。
+   * 参数（api/version/method/path…）通过 formData 交给原生层；DSM 要求参数段排在
+   * 文件段之前，顺序不符会返回 101（此时由 uploadFile() 回退到自拼报文的老路径）。
    */
+  private postUploadNative(
+    url: string,
+    version: number,
+    uniFsPath: string,
+    absPath: string,
+    destFolder: string,
+    onProgress: (percent: number) => void,
+    onTask: (task: any) => void,
+    fileName: string
+  ): Promise<void> {
+    // minVersion 是 2；v3 未见额外要求，统一用 2 更稳
+    const ver = version >= 2 ? 2 : version
+    const sep = url.indexOf('?') >= 0 ? '&' : '?'
+    const fullUrl = url + sep + '_sid=' + encodeURIComponent(this.sid)
+    // 注：保存到 NAS 的文件名取「待上传文件的文件名」，原生层按 filePath 的 basename 生成，
+    // 因此上传前必须把文件准备成目标名字（见 upload_manager 导出缓存时用 t.name）。
+
+    // uni.uploadFile 的 filePath 在不同版本里认的路径形式不同：
+    // 有的只认 unifile:// 沙盒协议，有的只认裸绝对路径，还有的认 file://。
+    // 全部试一遍，哪一个先成功就用哪一个（本地失败才换，服务端返回的错误不重试）。
+    const cands: Array<string> = []
+    const addCand = (p: string) => {
+      if (p.length > 0 && cands.indexOf(p) < 0) cands.push(p)
+    }
+    if (absPath.startsWith('/')) {
+      addCand('file://' + absPath)
+      addCand(absPath)
+    }
+    addCand(uniFsPath)
+
+    return new Promise<void>((resolve, reject) => {
+      onProgress(5)
+      let lastMsg = ''
+      const attempt = (idx: number, retried: boolean) => {
+        if (idx >= cands.length) {
+          reject(new SynoError(106, '上传失败：' + (lastMsg.length > 0 ? lastMsg : '无法读取待上传文件')))
+          return
+        }
+        const p = cands[idx]
+        const startedAt = Date.now()
+        let task: any = null
+        try {
+          task = uni.uploadFile({
+            url: fullUrl,
+            filePath: p,
+            name: 'file',
+            formData: {
+              api: 'SYNO.FileStation.Upload',
+              version: ver.toString(),
+              method: 'upload',
+              path: destFolder,
+              create_parents: 'true',
+              overwrite: 'true',
+            } as any,
+            // DSM 只认 Cookie 里的 sid（query 里的 _sid 这里也带上，双保险）
+            header: {
+              Cookie: 'id=' + this.sid,
+            } as any,
+            timeout: 1800000,
+            success: (res: any) => {
+              // 与 postUpload 相同的兼容处理：res.data 可能是字符串，也可能已被解析成对象
+              const raw: any = res.data
+              let json: Record<string, any> | null = null
+              let text = ''
+              if (raw != null) {
+                if (typeof raw == 'string') {
+                  text = raw as string
+                  try {
+                    json = JSON.parse(text) as Record<string, any>
+                  } catch (err2) {
+                    json = null
+                  }
+                } else {
+                  json = raw as Record<string, any>
+                  text = JSON.stringify(raw) ?? ''
+                }
+              }
+              if (json == null) {
+                reject(new SynoError(100, '上传失败：响应不是 JSON（' + text.slice(0, 80) + '）'))
+                return
+              }
+              if (json['success'] === true) {
+                onProgress(100)
+                resolve()
+              } else {
+                reject(this.parseError(json, 'SYNO.FileStation.Upload'))
+              }
+            },
+            fail: (err: any) => {
+              const msg = err != null && err.errMsg != null ? String(err.errMsg) : '网络异常'
+              lastMsg = msg
+              const isPerm = msg.indexOf('Permission') >= 0 || msg.indexOf('EACCES') >= 0
+              // 传了一段时间才断 → 多半是网络抖动（大视频很常见），同一路径重试一次
+              if (Date.now() - startedAt > 3000) {
+                if (!retried) {
+                  attempt(idx, true)
+                  return
+                }
+                if (isPerm) {
+                  reject(new SynoError(101, '上传失败：没有读取该文件的权限，请在系统设置中允许访问照片和视频后重试'))
+                  return
+                }
+                reject(new SynoError(106, '上传失败：' + msg))
+                return
+              }
+              // 立刻失败 → 多半是路径形式不对（FileSystemManager 会把裸路径拼到 www 下）
+              if (idx + 1 < cands.length) {
+                attempt(idx + 1, false)
+                return
+              }
+              if (isPerm) {
+                reject(new SynoError(101, '上传失败：没有读取该文件的权限，请在系统设置中允许访问照片和视频后重试'))
+                return
+              }
+              reject(new SynoError(106, '上传失败：' + msg))
+            },
+          } as any)
+        } catch (e) {
+          lastMsg = e instanceof Error ? e.message : String(e)
+          attempt(idx + 1, false)
+          return
+        }
+        // 进度回调：不同基座版本支持情况不同，拿不到就只显示粗粒度进度
+        try {
+          if (task != null && task.onProgressUpdate != null) {
+            task.onProgressUpdate((pr: any) => {
+              const v = pr != null && typeof pr.progress === 'number' ? (pr.progress as number) : 0
+              if (v > 0 && v < 100) {
+                // 5% 留给「准备文件」，100% 由响应成功时给出
+                onProgress(5 + Math.floor(v * 0.95))
+              }
+            })
+          }
+        } catch (e) {
+          // 忽略：进度不是必须的
+        }
+        onTask(task)
+      }
+      attempt(0, false)
+    })
+  }
+
   private postUpload(
     url: string,
     version: number,
@@ -1239,6 +1393,11 @@ export class SynoApi {
           const msg = e != null && e.errMsg != null ? String(e.errMsg) : '未知错误'
           if (msg.indexOf('Permission') >= 0 || msg.indexOf('EACCES') >= 0) {
             reject(new SynoError(101, '上传失败：没有读取该文件的权限，请在系统设置中允许访问照片和视频后重试'))
+            return
+          }
+          // FileSystemManager 对单文件大小有限制（超限报 maximum size of the file storage limit）
+          if (msg.toLowerCase().indexOf('maximum size') >= 0) {
+            reject(new SynoError(101, '上传失败：文件太大，超出系统单文件读取上限，请改用「选择任意文件上传」或更小的文件'))
             return
           }
           reject(new SynoError(101, '上传失败：读不到本地文件（' + msg + '）'))
