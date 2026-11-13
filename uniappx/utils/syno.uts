@@ -1237,6 +1237,10 @@ export class SynoApi {
         },
         fail: (e: any) => {
           const msg = e != null && e.errMsg != null ? String(e.errMsg) : '未知错误'
+          if (msg.indexOf('Permission') >= 0 || msg.indexOf('EACCES') >= 0) {
+            reject(new SynoError(101, '上传失败：没有读取该文件的权限，请在系统设置中允许访问照片和视频后重试'))
+            return
+          }
           reject(new SynoError(101, '上传失败：读不到本地文件（' + msg + '）'))
         },
       } as any)

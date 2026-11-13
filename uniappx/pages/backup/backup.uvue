@@ -172,7 +172,7 @@ import { upTaskList, startUpload, startUploadsBatch, cancelUpTask, removeUpTask,
 import { dlTaskList, DlTask } from '@/utils/download_manager.uts'
 import { backupFolder, backupPhotos } from '@/utils/backup_helper.uts'
 import { formatSize } from '@/utils/syno.uts'
-import { devicePickerSupported, devicePickDirectory, devicePickFiles, deviceClearCache, DeviceDir, DeviceFile } from '@/utils/device_picker.uts'
+import { devicePickerSupported, devicePickDirectory, devicePickFiles, deviceClearCache, ensureMediaReadPermission, DeviceDir, DeviceFile } from '@/utils/device_picker.uts'
 
 const maxPick = 100000
 
@@ -280,24 +280,133 @@ function dlStatusText(t: DlTask): string {
   return '下载失败'
 }
 
-/** 从本地路径推断文件名；App 端可能拿到 content:// 或无扩展名，此时用时间戳命名 */
-function fileNameFromPath(p: string, idx: number): string {
+/** 从本地路径推断文件名；content:// 或无扩展名时按类型+时间戳命名 */
+function fileNameFromPath(p: string, idx: number, fileType: string): string {
   let name = ''
   const parts = p.split('/')
   if (parts.length > 0) name = parts[parts.length - 1]
   const qi = name.indexOf('?')
   if (qi > 0) name = name.slice(0, qi)
-  if (name.length === 0 || name.indexOf('.') < 0 || name.startsWith('image:')) {
-    const d = new Date()
-    name = 'IMG_' + d.getTime() + '_' + idx + '.jpg'
-  }
-  return name
+  // content://media/external/images/media/1000000033 这类末尾只是数字，没有扩展名
+  const usable = name.length > 0 && name.indexOf('.') > 0 && name.indexOf(':') < 0 && !name.startsWith('image:')
+  if (usable) return name
+  const isVideo = fileType === 'video'
+  const d = new Date()
+  return (isVideo ? 'VID_' : 'IMG_') + d.getTime() + '_' + idx + (isVideo ? '.mp4' : '.jpg')
 }
 
 function pickPhotos() {
   const dest = destFolder.value.trim().length > 0 ? destFolder.value.trim() : '/home'
   destFolder.value = dest
   savePaths()
+  // 先申请相册读取权限：没有权限时即使能选中，读原图也会 EACCES（Permission denied）
+  ensureMediaReadPermission().then((ok: boolean) => {
+    if (!ok) {
+      uni.showModal({
+        title: '需要相册权限',
+        content: '请在「系统设置 → 应用 → 群晖助手 → 权限」中允许访问照片和视频，然后重试。',
+        showCancel: false,
+      })
+      return
+    }
+    openMediaPicker(dest)
+  })
+}
+
+/** App 端优先用 chooseMedia（图片+视频一次选完）；模块缺失时让用户二选一 */
+function openMediaPicker(dest: string) {
+  // #ifdef APP-ANDROID
+  let started = false
+  try {
+    uni.chooseMedia({
+      count: 50,
+      mediaType: ['mix'],
+      sizeType: ['original'],
+      sourceType: ['album', 'camera'],
+      success: (res) => {
+        const files = res.tempFiles
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i]
+          const type = typeof f.fileType === 'string' ? f.fileType : 'image'
+          startUpload(f.tempFilePath, fileNameFromPath(f.tempFilePath, i, type), dest)
+        }
+        uni.showToast({ title: '已加入 ' + files.length + ' 项', icon: 'none' })
+      },
+      fail: (err: any) => {
+        if (err.errCode === 1101001) {
+          return // 用户取消
+        }
+        chooseSourceThen(dest)
+      },
+    } as any)
+    started = true
+  } catch (e) {
+    started = false
+  }
+  if (!started) {
+    chooseSourceThen(dest)
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  pickImageOnly(dest)
+  // #endif
+}
+
+/**
+ * chooseMedia 不可用（基座没打进 uni-chooseMedia 模块）时的兜底菜单。
+ * 视频走系统文件选择器（SAF），不依赖任何存储权限。
+ */
+function chooseSourceThen(dest: string) {
+  if (!devicePickerSupported()) {
+    pickImageOnly(dest)
+    return
+  }
+  uni.showActionSheet({
+    itemList: ['从相册选图片', '选视频文件'],
+    success: (res) => {
+      if (res.tapIndex === 1) {
+        pickVideos(dest)
+      } else {
+        pickImageOnly(dest)
+      }
+    },
+    fail: () => {
+      // 用户取消就不做任何事
+    },
+  })
+}
+
+/** 用系统文件选择器选视频（SAF，多选），走 content:// → 缓存 → 上传 */
+function pickVideos(dest: string) {
+  uni.showLoading({ title: '打开选择器…', mask: true })
+  devicePickFiles(50, 'video/*')
+    .then((list: DeviceFile[]) => {
+      uni.hideLoading()
+      if (list.length === 0) {
+        return
+      }
+      const reqs: Array<UploadRequest> = []
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i]
+        const req: UploadRequest = {
+          localPath: '',
+          contentUri: f.uri,
+          name: f.name,
+          destFolder: dest,
+        }
+        reqs.push(req)
+      }
+      const n = startUploadsBatch(reqs)
+      uni.showToast({ title: '已加入 ' + n + ' 个视频', icon: 'none' })
+    })
+    .catch((e: any) => {
+      uni.hideLoading()
+      const msg = e instanceof Error ? e.message : String(e)
+      uni.showToast({ title: '选择失败：' + msg, icon: 'none' })
+    })
+}
+
+function pickImageOnly(dest: string) {
   uni.chooseImage({
     count: 50,
     sizeType: ['original'],
@@ -305,7 +414,7 @@ function pickPhotos() {
     success: (res) => {
       const paths = res.tempFilePaths
       for (let i = 0; i < paths.length; i++) {
-        startUpload(paths[i], fileNameFromPath(paths[i], i), dest)
+        startUpload(paths[i], fileNameFromPath(paths[i], i, 'image'), dest)
       }
       uni.showToast({ title: '已加入 ' + paths.length + ' 项', icon: 'none' })
     },

@@ -154,6 +154,84 @@ export function deviceClearCache(): Promise<number> {
   })
 }
 
+/**
+ * 申请读取相册（图片/视频）的权限。
+ *
+ * Android 13+ 用 READ_MEDIA_IMAGES / READ_MEDIA_VIDEO，12 及以下用 READ_EXTERNAL_STORAGE。
+ * 三个一起申请即可：系统会忽略当前版本不支持的项（grantedList 只返回支持的）。
+ *
+ * 返回 true 表示至少拿到一项读取权限；用户拒绝时返回 false（调用方应提示去设置里开）。
+ */
+export function ensureMediaReadPermission(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    let timer = 0
+    const done = (ok: boolean) => {
+      if (settled) return
+      settled = true
+      if (timer != 0) {
+        clearTimeout(timer)
+        timer = 0
+      }
+      resolve(ok)
+    }
+    // #ifdef APP-ANDROID
+    try {
+      // 该模块是可选模块：基座/安装包没编进去时回调不会触发，
+      // 因此必须有超时兜底，否则会卡在「点了没反应」
+      timer = setTimeout(() => {
+        done(true)
+      }, 2500)
+      uni.requestSystemPermission({
+        permissions: [
+          'android.permission.READ_MEDIA_IMAGES',
+          'android.permission.READ_MEDIA_VIDEO',
+          'android.permission.READ_EXTERNAL_STORAGE',
+        ],
+        success: (res: any) => {
+          const granted: Array<string> = res.grantedList ?? []
+          done(granted.length > 0)
+        },
+        fail: () => {
+          done(true)
+        },
+      } as any)
+    } catch (e) {
+      done(true)
+    }
+    // #endif
+    // #ifndef APP-ANDROID
+    done(true)
+    // #endif
+  })
+}
+
+/**
+ * 该路径是否需要先导出到应用缓存才能上传。
+ *
+ * `uni.request` 读本地文件只认应用沙盒内的路径，下面两类都读不了：
+ *  1. content://media/...（相册原始 URI，不是文件系统路径）
+ *  2. /storage/emulated/0/... 等外部存储路径（没有存储权限时直接 EACCES）
+ * 这两类统一走「插件用 ContentResolver 导出到 cache → 再上传」。
+ */
+export function needsCacheExport(p: string): boolean {
+  if (p.length == 0) return false
+  if (p.startsWith('unifile://')) return false
+  if (p.startsWith('content://')) return true
+  let path = p
+  if (path.startsWith('file://')) {
+    path = path.substring(7)
+  }
+  if (path.startsWith('/storage/') || path.startsWith('/sdcard/') || path.startsWith('/mnt/sdcard')) {
+    return true
+  }
+  // 应用私有目录（沙盒）可以直接读
+  if (path.startsWith('/data/user/0/') || path.startsWith('/data/data/') || path.startsWith('/data/storage/')) {
+    return false
+  }
+  return false
+}
+
 /** 删除上传完成后残留的缓存文件（失败静默） */
 export function deviceRemoveFile(path: string) {
   if (path.length == 0) {
