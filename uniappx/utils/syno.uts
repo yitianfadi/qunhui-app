@@ -1639,7 +1639,10 @@ export class SynoApi {
     return result
   }
 
-  /** 缩略图 URL（社区验证格式） */
+  /**
+   * 缩略图 URL。
+   * size 只支持 sm / m / xl（实测 DSM 7.4：传 md 会返回 JSON 错误，图片显示空白）。
+   */
   thumbUrl(item: PhotoItem, sharedSpace: boolean, size: string): string {
     const api = sharedSpace ? 'SYNO.FotoTeam.Thumbnail' : 'SYNO.Foto.Thumbnail'
     const actual = this.apiTable[api] != null ? api : 'SYNO.Foto.Thumbnail'

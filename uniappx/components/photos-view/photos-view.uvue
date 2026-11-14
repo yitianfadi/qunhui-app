@@ -9,86 +9,325 @@
       <text v-if="errorMsg.length > 0" class="text-error error-center">{{ errorMsg }}</text>
       <text v-if="errorMsg.length > 0" class="retry-btn" @click="reload">重试</text>
 
-      <view v-if="photos.length > 0" class="grid">
-        <view v-for="(p, index) in photos" :key="index" class="grid-item" @click="preview(p)">
-          <image class="thumb" :src="api.thumbUrl(p, shared, 'md')" mode="aspectFill" />
-          <text v-if="p.isVideo === true" class="video-badge">▶</text>
+      <!-- 时间轴：按月分组 -->
+      <view v-for="(sec, si) in sections" :key="'s' + si" class="section">
+        <text class="section-title">{{ sec.title }} · {{ sec.items.length }}</text>
+        <view class="grid">
+          <view v-for="(p, pi) in sec.items" :key="'p' + p.unitId" class="grid-item" @click="preview(p)">
+            <image class="thumb" :src="api.thumbUrl(p, shared, 'm')" mode="aspectFill" />
+            <text v-if="p.isVideo === true" class="video-badge">▶</text>
+          </view>
         </view>
       </view>
-      <view v-else-if="errorMsg.length === 0 && photos.length === 0" class="empty-box">
+
+      <view v-if="loadingMore === true" class="more-tip">
+        <text class="text-secondary">加载中…</text>
+      </view>
+      <view v-else-if="noMore === true && photos.length > 0" class="more-tip">
+        <text class="text-secondary">已经到底了</text>
+      </view>
+
+      <view v-if="errorMsg.length === 0 && photos.length === 0 && loadingMore === false" class="empty-box">
         <text class="text-secondary">暂无照片</text>
       </view>
       <view class="bottom-space" />
     </scroll-view>
 
-    <!-- 预览弹窗 -->
-    <view v-if="previewItem != null" class="mask" @click="previewItem = null">
-      <view class="preview-box" @click.stop="">
-        <image class="preview-img" :src="api.thumbUrl(previewItem!, shared, 'xl')" mode="aspectFit" />
-        <view class="preview-bar">
-          <text class="preview-name">{{ previewItem!.fileName }}</text>
-          <text class="preview-action" @click="downloadPhoto">⬇️ 原图</text>
-        </view>
+    <!-- 全屏查看：左右滑动 + 双指缩放 -->
+    <view v-if="viewerOpen === true" class="viewer">
+      <swiper class="viewer-swiper" :current="viewerIndex" :indicator-dots="false" @change="onSwiperChange">
+        <swiper-item v-for="(p, vi) in photos" :key="'v' + p.unitId">
+          <view
+            class="zoom-area"
+            @click="onImageTap"
+            @touchstart="onTouchStart"
+            @touchmove="onTouchMove"
+            @touchend="onTouchEnd"
+          >
+            <image
+              class="viewer-img"
+              :src="api.thumbUrl(p, shared, 'xl')"
+              mode="aspectFit"
+              :style="vi === viewerIndex ? zoomStyle() : ''"
+            />
+          </view>
+        </swiper-item>
+      </swiper>
+
+      <!-- 顶部：序号 + 关闭 -->
+      <view class="viewer-top">
+        <text class="viewer-count">{{ viewerIndex + 1 }} / {{ photos.length }}</text>
+        <text class="viewer-close" @click="closeViewer">✕</text>
+      </view>
+
+      <!-- 底部操作条 -->
+      <view class="viewer-bar">
+        <text class="viewer-name" max-lines="1">{{ currentName() }}</text>
+        <text class="viewer-btn" @click="saveCurrent">保存到相册</text>
+        <text class="viewer-btn" @click="downloadCurrent">原图</text>
       </view>
     </view>
   </view>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api, PhotoItem } from '@/utils/syno.uts'
 import { startDownload } from '@/utils/download_manager.uts'
 
 const shared = ref(false)
 const photos = ref<Array<PhotoItem>>([])
 const errorMsg = ref('')
-const previewItem = ref<PhotoItem | null>(null)
 const offset = ref(0)
+const loadingMore = ref(false)
+const noMore = ref(false)
 const PAGE_SIZE = 90
 
+// ---------------- 时间轴分组 ----------------
+
+type PhotoSection = {
+  key: string
+  title: string
+  items: Array<PhotoItem>
+}
+
+/** 按 takenTime（YYYY-MM-DD）的月份分组，分组顺序即服务器返回顺序 */
+const sections = computed<Array<PhotoSection>>(() => {
+  const out: Array<PhotoSection> = []
+  const index: Record<string, number> = {}
+  for (let i = 0; i < photos.value.length; i++) {
+    const p = photos.value[i]
+    const t = p.takenTime
+    const key = t.length >= 7 ? t.substring(0, 7) : '未知时间'
+    let title = key
+    if (key.length === 7) {
+      title = key.substring(0, 4) + ' 年 ' + key.substring(5, 7) + ' 月'
+    }
+    let at = index[key]
+    if (at == null) {
+      at = out.length
+      index[key] = at
+      out.push({ key: key, title: title, items: [] } as PhotoSection)
+    }
+    out[at].items.push(p)
+  }
+  return out
+})
+
+// ---------------- 加载 ----------------
+
 async function loadMore() {
+  if (loadingMore.value || noMore.value) return
+  loadingMore.value = true
   try {
     const r = await api.listPhotos(shared.value, offset.value, PAGE_SIZE)
     if (r.list.length > 0) {
       photos.value = photos.value.concat(r.list)
       offset.value = offset.value + r.list.length
     }
+    if (r.list.length < PAGE_SIZE) noMore.value = true
     errorMsg.value = ''
   } catch (e) {
     errorMsg.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    loadingMore.value = false
   }
 }
 
 function reload() {
   photos.value = []
   offset.value = 0
+  noMore.value = false
   loadMore()
 }
 
 function switchSpace(toShared: boolean) {
   if (shared.value === toShared) return
   shared.value = toShared
+  closeViewer()
   reload()
 }
 
 loadMore()
 
+// ---------------- 全屏查看 ----------------
+
+const viewerOpen = ref(false)
+const viewerIndex = ref(0)
+
 function preview(p: PhotoItem) {
-  previewItem.value = p
+  let at = 0
+  for (let i = 0; i < photos.value.length; i++) {
+    if (photos.value[i].unitId === p.unitId) {
+      at = i
+      break
+    }
+  }
+  viewerIndex.value = at
+  viewerOpen.value = true
 }
 
-function downloadPhoto() {
-  const p = previewItem.value
+function closeViewer() {
+  viewerOpen.value = false
+  resetZoom()
+}
+
+function onSwiperChange(e: any) {
+  const cur = e != null && e.detail != null && typeof e.detail.current === 'number' ? (e.detail.current as number) : 0
+  viewerIndex.value = cur
+  resetZoom()
+}
+
+// ---------------- 双击缩放 + 单指拖动（uni-app x 没有 movable-view） ----------------
+
+const zoomScale = ref(1)
+const panX = ref(0)
+const panY = ref(0)
+let lastTapAt = 0
+let touchStartX = 0
+let touchStartY = 0
+let panStartX = 0
+let panStartY = 0
+
+function zoomStyle(): string {
+  if (zoomScale.value === 1 && panX.value === 0 && panY.value === 0) return ''
+  return 'transform: translate(' + panX.value.toString() + 'px, ' + panY.value.toString() + 'px) scale(' + zoomScale.value.toString() + ')'
+}
+
+function resetZoom() {
+  zoomScale.value = 1
+  panX.value = 0
+  panY.value = 0
+}
+
+/** 双击：在 1x 与 2.5x 之间切换 */
+function onImageTap() {
+  const now = Date.now()
+  if (now - lastTapAt < 320) {
+    lastTapAt = 0
+    if (zoomScale.value > 1) {
+      resetZoom()
+    } else {
+      zoomScale.value = 2.5
+      panX.value = 0
+      panY.value = 0
+    }
+    return
+  }
+  lastTapAt = now
+}
+
+function touchXY(e: any): Array<number> {
+  const out: Array<number> = [0, 0]
+  if (e == null || e.touches == null || e.touches.length === 0) return out
+  const t = e.touches[0]
+  if (t == null) return out
+  out[0] = typeof t.clientX === 'number' ? (t.clientX as number) : 0
+  out[1] = typeof t.clientY === 'number' ? (t.clientY as number) : 0
+  return out
+}
+
+function onTouchStart(e: any) {
+  const xy = touchXY(e)
+  touchStartX = xy[0]
+  touchStartY = xy[1]
+  panStartX = panX.value
+  panStartY = panY.value
+}
+
+function onTouchMove(e: any) {
+  if (zoomScale.value <= 1) return
+  const xy = touchXY(e)
+  panX.value = panStartX + (xy[0] - touchStartX)
+  panY.value = panStartY + (xy[1] - touchStartY)
+}
+
+function onTouchEnd() {
+  // 拖出边界后回弹一小段，避免图片被拖飞
+  const limit = 600 * zoomScale.value
+  if (panX.value > limit) panX.value = limit
+  if (panX.value < -limit) panX.value = -limit
+  if (panY.value > limit) panY.value = limit
+  if (panY.value < -limit) panY.value = -limit
+}
+
+function currentItem(): PhotoItem | null {
+  const i = viewerIndex.value
+  if (i < 0 || i >= photos.value.length) return null
+  return photos.value[i]
+}
+
+function currentName(): string {
+  const p = currentItem()
+  return p != null ? p.fileName : ''
+}
+
+/** 下载原图到本机（走下载队列，可在「传输」里看进度） */
+function downloadCurrent() {
+  const p = currentItem()
   if (p == null) return
   const name = p.fileName.length > 0 ? p.fileName : 'photo_' + p.unitId + '.jpg'
-  // 统一走下载队列（App 端后台下载，Web 端交给浏览器）
   startDownload(api.photoDownloadUrl(p, shared.value), name, '/photo/' + name)
-  previewItem.value = null
   // #ifdef WEB
   uni.showToast({ title: '已开始浏览器下载', icon: 'none' })
   // #endif
   // #ifndef WEB
   uni.showToast({ title: '已加入下载列表', icon: 'none' })
+  // #endif
+}
+
+/** 保存到系统相册：先下到临时文件再交给相册（图片/视频分开调用） */
+function saveCurrent() {
+  const p = currentItem()
+  if (p == null) return
+  // #ifdef WEB
+  uni.showToast({ title: 'Web 端请用「原图」下载', icon: 'none' })
+  // #endif
+  // #ifndef WEB
+  const url = api.photoDownloadUrl(p, shared.value)
+  const isVideo = p.isVideo
+  uni.showLoading({ title: '准备保存', mask: true } as any)
+  uni.downloadFile({
+    url: url,
+    success: (res: any) => {
+      const code = typeof res.statusCode === 'number' ? (res.statusCode as number) : 0
+      if (code !== 200) {
+        uni.hideLoading()
+        uni.showToast({ title: '下载失败（' + code.toString() + '）', icon: 'none' })
+        return
+      }
+      const temp = typeof res.tempFilePath === 'string' ? (res.tempFilePath as string) : ''
+      if (isVideo) {
+        uni.saveVideoToPhotosAlbum({
+          filePath: temp,
+          success: () => {
+            uni.hideLoading()
+            uni.showToast({ title: '已保存到相册', icon: 'none' })
+          },
+          fail: () => {
+            uni.hideLoading()
+            uni.showToast({ title: '保存失败，请检查相册权限', icon: 'none' })
+          },
+        } as any)
+        return
+      }
+      uni.saveImageToPhotosAlbum({
+        filePath: temp,
+        success: () => {
+          uni.hideLoading()
+          uni.showToast({ title: '已保存到相册', icon: 'none' })
+        },
+        fail: () => {
+          uni.hideLoading()
+          uni.showToast({ title: '保存失败，请检查相册权限', icon: 'none' })
+        },
+      } as any)
+    },
+    fail: () => {
+      uni.hideLoading()
+      uni.showToast({ title: '下载失败，请检查网络', icon: 'none' })
+    },
+  } as any)
   // #endif
 }
 </script>
@@ -118,6 +357,16 @@ function downloadPhoto() {
   .photo-scroll {
     flex: 1;
   }
+  .section {
+    flex-direction: column;
+  }
+  .section-title {
+    font-size: 13px;
+    color: #4b5563;
+    font-weight: bold;
+    padding: 12px 12px 6px 12px;
+    background-color: #f7f8fa;
+  }
   .grid {
     flex-direction: row;
     flex-wrap: wrap;
@@ -140,6 +389,10 @@ function downloadPhoto() {
     color: #ffffff;
     font-size: 14px;
   }
+  .more-tip {
+    padding: 14px;
+    align-items: center;
+  }
   .error-center {
     width: 100%;
     text-align: center;
@@ -158,36 +411,64 @@ function downloadPhoto() {
   .bottom-space {
     height: 60px;
   }
-  .mask {
+  .viewer {
     position: fixed;
     left: 0;
     top: 0;
     right: 0;
     bottom: 0;
-    background-color: rgba(0, 0, 0, 0.85);
+    background-color: #000000;
+  }
+  .viewer-swiper {
+    flex: 1;
+  }
+  .zoom-area {
+    width: 100%;
+    height: 100%;
     align-items: center;
     justify-content: center;
   }
-  .preview-box {
-    flex-direction: column;
-    align-items: center;
+  .viewer-img {
+    width: 100%;
+    height: 100%;
   }
-  .preview-img {
-    width: 640px;
-    height: 480px;
-  }
-  .preview-bar {
+  .viewer-top {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
     flex-direction: row;
     align-items: center;
-    margin-top: 12px;
+    padding: 40px 16px 12px 16px;
   }
-  .preview-name {
+  .viewer-count {
+    flex: 1;
     color: #ffffff;
     font-size: 14px;
-    margin-right: 20px;
   }
-  .preview-action {
+  .viewer-close {
+    color: #ffffff;
+    font-size: 20px;
+    padding: 4px 8px;
+  }
+  .viewer-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    flex-direction: row;
+    align-items: center;
+    padding: 14px 16px 26px 16px;
+    background-color: rgba(0, 0, 0, 0.45);
+  }
+  .viewer-name {
+    flex: 1;
+    color: #ffffff;
+    font-size: 12px;
+  }
+  .viewer-btn {
     color: #7cc0ff;
     font-size: 14px;
+    padding-left: 16px;
   }
 </style>
