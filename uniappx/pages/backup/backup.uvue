@@ -15,7 +15,29 @@
             <input class="path-input" v-model="destFolder" placeholder="/home 或 /photo" />
             <text class="path-pick" @click="openPicker('dest')">选择</text>
           </view>
-          <text class="hint">点「选择」浏览 NAS 上已存在的共享文件夹（如 /home、/photo）。共享文件夹本身不能自动创建（子目录可以），同名文件将覆盖。</text>
+          <text class="hint">点「选择」浏览 NAS 上已存在的共享文件夹（如 /home、/photo）。共享文件夹本身不能自动创建（子目录可以）。</text>
+
+          <view class="opt-row" @click="pickConflictPolicy">
+            <text class="opt-label">同名文件</text>
+            <text class="opt-value">{{ conflictLabel }}</text>
+            <text class="chevron">›</text>
+          </view>
+          <view class="opt-row" @click="toggleDateSubdir">
+            <text class="opt-label">按日期建子目录</text>
+            <text class="opt-value">{{ dateSubdir ? '开（如 /photo/2026-11-14）' : '关' }}</text>
+            <text class="chevron">›</text>
+          </view>
+          <view class="opt-row" @click="toggleWifiOnly">
+            <text class="opt-label">仅在 Wi-Fi 下上传</text>
+            <text class="opt-value">{{ wifiOnly ? '开' : '关' }}</text>
+            <text class="chevron">›</text>
+          </view>
+        </view>
+
+        <!-- 非 Wi-Fi 时的暂停提示 -->
+        <view v-if="netBlocked === true" class="net-tip">
+          <text class="net-tip-text">当前不是 Wi-Fi，上传已暂停</text>
+          <text class="net-tip-act" @click="allowCellularUploadNow">仍要继续</text>
         </view>
 
         <view class="action-card" @click="pickPhotos">
@@ -54,7 +76,8 @@
         <!-- 上传队列 -->
         <view v-if="upTasks.length > 0" class="queue-head">
           <text class="queue-title">上传队列 {{ upTasks.length }}</text>
-          <text class="queue-clear" @click="cancelUpAll">全部取消</text>
+          <text v-if="failedUpCount > 0" class="queue-clear" @click="retryAllFailed">重试失败 {{ failedUpCount }}</text>
+          <text class="queue-clear queue-clear-gap" @click="cancelUpAll">全部取消</text>
           <text class="queue-clear queue-clear-gap" @click="clearUp">清空已结束</text>
         </view>
         <view v-if="upTasks.length > recentUp.length" class="queue-note">
@@ -168,7 +191,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { upTaskList, startUpload, startUploadsBatch, cancelUpTask, removeUpTask, clearFinishedUpTasks, retryUpTask, cancelAllUpTasks, UpTask, UploadRequest } from '@/utils/upload_manager.uts'
+import { upTaskList, startUpload, startUploadsBatch, cancelUpTask, removeUpTask, clearFinishedUpTasks, retryUpTask, cancelAllUpTasks, retryAllFailedUpTasks, getConflictPolicy, setConflictPolicy, getDateSubdir, setDateSubdir, getWifiOnly, setWifiOnly, upNetworkBlocked, allowCellularUpload, UpTask, UploadRequest } from '@/utils/upload_manager.uts'
 import { dlTaskList, DlTask } from '@/utils/download_manager.uts'
 import { backupFolder, backupPhotos } from '@/utils/backup_helper.uts'
 import { formatSize } from '@/utils/syno.uts'
@@ -229,8 +252,75 @@ function savePaths() {
   }
 }
 
+// ---------------- 上传选项 ----------------
+
+const conflictPolicy = ref(getConflictPolicy())
+const conflictLabel = computed(() => {
+  const p = conflictPolicy.value
+  if (p === 'skip') return '跳过（保留 NAS 上的）'
+  if (p === 'rename') return '自动重命名'
+  return '覆盖（默认）'
+})
+
+function pickConflictPolicy() {
+  uni.showActionSheet({
+    itemList: ['覆盖同名文件', '跳过（保留 NAS 上的）', '自动重命名（xxx (1).mp4）'],
+    success: (res) => {
+      let v = 'overwrite'
+      if (res.tapIndex === 1) v = 'skip'
+      if (res.tapIndex === 2) v = 'rename'
+      conflictPolicy.value = v
+      setConflictPolicy(v)
+    },
+    fail: () => {
+      // 用户取消
+    },
+  })
+}
+
+const dateSubdir = ref(getDateSubdir())
+
+function toggleDateSubdir() {
+  dateSubdir.value = !dateSubdir.value
+  setDateSubdir(dateSubdir.value)
+}
+
+const wifiOnly = ref(getWifiOnly())
+
+function toggleWifiOnly() {
+  wifiOnly.value = !wifiOnly.value
+  setWifiOnly(wifiOnly.value)
+}
+
+// 网络被拦是模块级 ref，这里镜像一份，避免模板对导入 ref 的解包差异
+const netBlocked = ref(false)
+watch(
+  upNetworkBlocked,
+  (v: boolean) => {
+    netBlocked.value = v
+  },
+  { immediate: true }
+)
+
+function allowCellularUploadNow() {
+  allowCellularUpload()
+}
+
+function retryAllFailed() {
+  const n = retryAllFailedUpTasks()
+  uni.showToast({ title: '已重新加入 ' + n + ' 个', icon: 'none' })
+}
+
 // 用本地 ref 镜像队列：避免模板对「导入 ref 的局部别名」解包差异（App 端更稳）
 const upTasks = ref<Array<UpTask>>([])
+// 失败任务数（用于队列头的「重试失败 N」）
+const failedUpCount = computed(() => {
+  let n = 0
+  for (let i = 0; i < upTasks.value.length; i++) {
+    if (upTasks.value[i].status === 'failed') n = n + 1
+  }
+  return n
+})
 // 大批量任务时只渲染最近的若干条，避免上千行同时渲染卡住列表
 const RENDER_LIMIT = 120
 const recentUp = ref<Array<UpTask>>([])
@@ -734,6 +824,43 @@ function openDownloadPage() {
     font-size: 11px;
     color: #9aa0a8;
     margin-top: 10px;
+  }
+  .opt-row {
+    flex-direction: row;
+    align-items: center;
+    height: 40px;
+    background-color: #f5f7fa;
+    border-radius: 8px;
+    padding: 0 12px;
+    margin-top: 8px;
+  }
+  .opt-label {
+    font-size: 14px;
+    color: #1a1d21;
+  }
+  .opt-value {
+    flex: 1;
+    text-align: right;
+    font-size: 13px;
+    color: #6b7280;
+  }
+  .net-tip {
+    flex-direction: row;
+    align-items: center;
+    margin: 10px 12px 0 12px;
+    padding: 10px 12px;
+    background-color: #fff7e6;
+    border-radius: 10px;
+  }
+  .net-tip-text {
+    flex: 1;
+    font-size: 12px;
+    color: #8a5a00;
+  }
+  .net-tip-act {
+    font-size: 12px;
+    color: #1e6bb8;
+    padding-left: 10px;
   }
   .action-card {
     background-color: #ffffff;

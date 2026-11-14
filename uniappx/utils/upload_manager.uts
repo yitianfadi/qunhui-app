@@ -34,6 +34,221 @@ let currentId = ''
 let currentTask: any = null
 let seq = 0
 
+// ---------------- 上传选项（同名策略 / 日期子目录） ----------------
+
+/** 同名文件处理策略：overwrite 覆盖 / skip 跳过 / rename 自动重命名 */
+let conflictPolicy = 'overwrite'
+/** 是否在目标目录下按日期建子目录（/photo → /photo/2026-11-14） */
+let dateSubdir = false
+
+try {
+  const p = uni.getStorageSync('upload_conflict_policy')
+  if (typeof p === 'string' && (p as string).length > 0) {
+    conflictPolicy = p as string
+  }
+  const ds = uni.getStorageSync('upload_date_subdir')
+  if (typeof ds === 'string') {
+    dateSubdir = (ds as string) === '1'
+  }
+} catch (e) {
+  // 存储不可用时用默认值
+}
+
+export function getConflictPolicy(): string {
+  return conflictPolicy
+}
+
+export function setConflictPolicy(v: string) {
+  conflictPolicy = v
+  try {
+    uni.setStorageSync('upload_conflict_policy', v)
+  } catch (e) {
+    // 忽略
+  }
+}
+
+export function getDateSubdir(): boolean {
+  return dateSubdir
+}
+
+export function setDateSubdir(v: boolean) {
+  dateSubdir = v
+  try {
+    uni.setStorageSync('upload_date_subdir', v ? '1' : '0')
+  } catch (e) {
+    // 忽略
+  }
+}
+
+/** 今天的日期目录名，如 2026-11-14 */
+function todayDirName(): string {
+  const d = new Date()
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+}
+
+/** 按开关把目标目录转换成实际写入目录 */
+function applyDestFolder(base: string): string {
+  if (!dateSubdir) {
+    return base
+  }
+  let b = base
+  while (b.length > 1 && b.endsWith('/')) {
+    b = b.substring(0, b.length - 1)
+  }
+  return b + '/' + todayDirName()
+}
+
+// ---------------- 仅 Wi-Fi 上传 ----------------
+
+/** 只允许在 Wi-Fi 下上传 */
+let wifiOnly = false
+/** 用户在提示条上点了「仍要继续」，本次会话内放行 */
+let forceCellular = false
+/** 当前网络类型（uni.getNetworkType 的返回值，未探测到时为空串） */
+let currentNetwork = ''
+let networkWatchReady = false
+
+/** 队列是否因为「非 Wi-Fi」被暂停（UI 用来显示提示条） */
+export const upNetworkBlocked = ref(false)
+
+try {
+  const w = uni.getStorageSync('upload_wifi_only')
+  if (typeof w === 'string') {
+    wifiOnly = (w as string) === '1'
+  }
+} catch (e) {
+  // 忽略
+}
+
+export function getWifiOnly(): boolean {
+  return wifiOnly
+}
+
+export function setWifiOnly(v: boolean) {
+  wifiOnly = v
+  forceCellular = false
+  try {
+    uni.setStorageSync('upload_wifi_only', v ? '1' : '0')
+  } catch (e) {
+    // 忽略
+  }
+  if (!v) {
+    upNetworkBlocked.value = false
+    pump()
+  }
+}
+
+function ensureNetworkWatch() {
+  if (networkWatchReady) {
+    return
+  }
+  networkWatchReady = true
+  try {
+    uni.getNetworkType({
+      success: (res: any) => {
+        currentNetwork = typeof res.networkType === 'string' ? res.networkType : ''
+      },
+      fail: () => {
+        currentNetwork = ''
+      },
+    } as any)
+  } catch (e) {
+    currentNetwork = ''
+  }
+  try {
+    uni.onNetworkStatusChange((res: any) => {
+      currentNetwork = typeof res.networkType === 'string' ? res.networkType : ''
+      if (currentNetwork === 'wifi') {
+        // 切回 Wi-Fi 自动继续
+        forceCellular = false
+        pump()
+      } else {
+        upNetworkBlocked.value = shouldBlockByNetwork()
+      }
+    } as any)
+  } catch (e) {
+    // 忽略
+  }
+}
+
+/** 非 Wi-Fi 且开关打开时拦截；网络类型未知时放行（避免误拦） */
+function shouldBlockByNetwork(): boolean {
+  if (!wifiOnly || forceCellular) {
+    return false
+  }
+  if (currentNetwork.length === 0 || currentNetwork === 'unknown' || currentNetwork === 'wifi') {
+    return false
+  }
+  return true
+}
+
+/** 用户在「非 Wi-Fi」提示条上点「仍要继续」 */
+export function allowCellularUpload() {
+  forceCellular = true
+  upNetworkBlocked.value = false
+  pump()
+}
+
+// ---------------- 同名冲突检测 ----------------
+
+/** 目录 → 文件名列表（10 秒内复用，避免批量上传时每个文件都列一次目录） */
+const dirNameCache = new Map<string, Array<string>>()
+const dirCacheAt = new Map<string, number>()
+
+function rememberName(folder: string, name: string) {
+  const names = dirNameCache.get(folder)
+  if (names != null && names.indexOf(name) < 0) {
+    names.push(name)
+  }
+}
+
+async function knownNames(folder: string): Promise<Array<string>> {
+  const now = Date.now()
+  const at = dirCacheAt.get(folder)
+  if (at != null && now - at < 10000) {
+    const cached = dirNameCache.get(folder)
+    if (cached != null) {
+      return cached
+    }
+  }
+  try {
+    const files = await api.listFiles(folder)
+    const names: Array<string> = []
+    for (let i = 0; i < files.length; i++) {
+      names.push(files[i].name)
+    }
+    dirNameCache.set(folder, names)
+    dirCacheAt.set(folder, now)
+    return names
+  } catch (e) {
+    // 目录不存在 / 没权限：交给上传本身的错误提示，这里当作空目录
+    return []
+  }
+}
+
+/** 拆成「主名 + 扩展名」 */
+function splitExt(name: string): Array<string> {
+  const i = name.lastIndexOf('.')
+  if (i <= 0) {
+    return [name, '']
+  }
+  return [name.substring(0, i), name.substring(i)]
+}
+
+/** 生成不与现有文件冲突的名字：xxx (1).mp4、xxx (2).mp4… */
+function nextFreeName(name: string, taken: Array<string>): string {
+  const parts = splitExt(name)
+  let i = 1
+  while (i <= 9999) {
+    const cand = parts[0] + ' (' + i + ')' + parts[1]
+    if (taken.indexOf(cand) < 0) {
+      return cand
+    }
+    i = i + 1
+  }
+  return parts[0] + '_' + Date.now().toString() + parts[1]
+}
+
 /**
  * 待上传队列（FIFO，只存 id）
  * 之前每次 pump 都从任务数组末尾倒扫，任务多时退化为 O(n²)；
@@ -101,12 +316,13 @@ export function startUploadFromUri(uri: string, fileName: string, destFolder: st
 }
 
 function createTask(localPath: string, contentUri: string, fileName: string, destFolder: string): UpTask {
+  ensureNetworkWatch()
   seq = seq + 1
   const t: UpTask = {
     id: 'up' + Date.now() + '_' + seq,
     name: fileName,
     localPath: localPath,
-    destFolder: destFolder,
+    destFolder: applyDestFolder(destFolder),
     status: 'waiting',
     percent: 0,
     sizeText: '等待中…',
@@ -132,6 +348,7 @@ export function startUploadsBatch(reqs: Array<UploadRequest>): number {
   if (reqs.length === 0) {
     return 0
   }
+  ensureNetworkWatch()
   const created: Array<UpTask> = []
   const batchTime = timeNow()
   for (let i = 0; i < reqs.length; i++) {
@@ -144,7 +361,7 @@ export function startUploadsBatch(reqs: Array<UploadRequest>): number {
       id: 'up' + Date.now() + '_' + seq,
       name: r.name,
       localPath: r.localPath,
-      destFolder: r.destFolder,
+      destFolder: applyDestFolder(r.destFolder),
       status: 'waiting',
       percent: 0,
       sizeText: '等待中…',
@@ -165,6 +382,11 @@ export function startUploadsBatch(reqs: Array<UploadRequest>): number {
 
 function pump() {
   if (currentId.length > 0) return
+  if (shouldBlockByNetwork()) {
+    upNetworkBlocked.value = true
+    return
+  }
+  upNetworkBlocked.value = false
   while (pendingIds.length > 0) {
     const id = pendingIds.shift()
     if (id == null || id.length === 0) {
@@ -186,6 +408,21 @@ async function runTask(t: UpTask) {
   let uploadPath = t.localPath
   let fromCache = false
   try {
+    // 同名策略：覆盖交给服务端 overwrite=true；跳过/重命名要先知道目标目录里有什么
+    if (conflictPolicy !== 'overwrite') {
+      const names = await knownNames(t.destFolder)
+      if (names.indexOf(t.name) >= 0) {
+        if (conflictPolicy === 'skip') {
+          t.status = 'done'
+          t.percent = 100
+          t.sizeText = '已跳过（同名文件已存在）'
+          return
+        }
+        t.name = nextFreeName(t.name, names)
+        t.sizeText = '改名为 ' + t.name
+      }
+    }
+
     // content:// 或外部存储路径：先导出到应用缓存再上传，上传结束即删除
     // 注意这是「按需」导出：同一时刻磁盘上只有一个文件的副本，不会因为选了几千个就占满空间
     const uri = t.contentUri.length > 0 ? t.contentUri : (needsCacheExport(t.localPath) ? t.localPath : '')
@@ -219,6 +456,7 @@ async function runTask(t: UpTask) {
     t.status = 'done'
     t.percent = 100
     t.sizeText = '已保存到 ' + t.destFolder
+    rememberName(t.destFolder, t.name)
   } catch (e) {
     if (t.status !== 'canceled') {
       t.status = 'failed'
@@ -284,6 +522,21 @@ export function retryUpTask(id: string) {
     }
     pump()
   }
+}
+
+/** 重试全部失败任务，返回重试数量（列表是最新在前，按加入顺序重排） */
+export function retryAllFailedUpTasks(): number {
+  const list = upTaskList.value
+  const ids: Array<string> = []
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].status === 'failed') {
+      ids.push(list[i].id)
+    }
+  }
+  for (let i = ids.length - 1; i >= 0; i--) {
+    retryUpTask(ids[i])
+  }
+  return ids.length
 }
 
 /** 取消全部进行中与排队中的任务（批量上传时想中途停止用） */

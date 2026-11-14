@@ -1488,6 +1488,24 @@ export class SynoApi {
     await this.call('SYNO.FileStation.Delete', 'start', { path: paths, recursive: 'true' })
   }
 
+  /**
+   * 复制 / 移动（removeSrc=true 为移动）。
+   * DSM 的 path 参数按官方示例用 JSON 数组字符串，destFolder 必须已存在。
+   */
+  async copyMove(paths: string[], destFolder: string, removeSrc: boolean, overwrite: boolean) {
+    let list = ''
+    for (let i = 0; i < paths.length; i++) {
+      if (i > 0) list = list + ','
+      list = list + '"' + paths[i].replace(/"/g, '\\"') + '"'
+    }
+    await this.call('SYNO.FileStation.CopyMove', 'start', {
+      path: '[' + list + ']',
+      dest_folder: destFolder,
+      remove_src: removeSrc ? 'true' : 'false',
+      overwrite: overwrite ? 'true' : 'false',
+    }, 3)
+  }
+
   async createShareLink(path: string): Promise<string> {
     const data = await this.call('SYNO.FileStation.Share', 'create', { path: path })
     return strOf(data, 'link')

@@ -3,7 +3,8 @@
     <!-- 路径栏 -->
     <view class="path-bar">
       <text class="up-btn" :class="stack.length > 0 ? 'up-btn-on' : 'up-btn-off'" @click="goUp">↑</text>
-      <text class="path-text">{{ currentPath }}</text>
+      <text class="path-text">{{ inRecycle ? recycleShare + ' · 回收站' : currentPath }}</text>
+      <text v-if="inRecycle" class="recycle-clear" @click="emptyRecycle">清空</text>
       <text class="refresh-btn" @click="load">⟳</text>
     </view>
 
@@ -44,8 +45,8 @@
 
     <!-- 下载进度与完成提示统一在「下载管理」页展示，此处不再弹框 -->
 
-    <!-- 新建文件夹 FAB -->
-    <view v-if="stack.length > 0" class="fab" @click="createFolder">
+    <!-- 新建文件夹 FAB（回收站里不允许新建） -->
+    <view v-if="stack.length > 0 && inRecycle === false" class="fab" @click="createFolder">
       <text class="fab-text">＋📁</text>
     </view>
   </view>
@@ -65,6 +66,9 @@ const actionItem = ref<FileItem | null>(null)
 const shareLink = ref('')
 
 const currentPath = ref('/')
+/** 是否处于回收站视图；非空时 recycleShare 是所属共享名（如 photo） */
+const inRecycle = ref(false)
+const recycleShare = ref('')
 
 function refreshPath() {
   currentPath.value = stack.value.length === 0 ? '/' : '/' + stack.value.join('/')
@@ -83,7 +87,12 @@ async function load() {
       items.value = await api.listFiles(currentPath.value)
     }
   } catch (e) {
-    errorMsg.value = e instanceof Error ? e.message : String(e)
+    let msg = e instanceof Error ? e.message : String(e)
+    // 没启用回收站的共享，进 #recycle 会报「文件不存在」，这里换成可读文案
+    if (inRecycle.value && (msg.indexOf('408') >= 0 || msg.indexOf('不存在') >= 0 || msg.indexOf('not exist') >= 0)) {
+      msg = '该共享文件夹没有回收站（可能未启用或已清空）'
+    }
+    errorMsg.value = msg
     items.value = []
   } finally {
     uni.hideLoading()
@@ -94,6 +103,17 @@ async function load() {
 load()
 
 function openItem(item: FileItem) {
+  if (inRecycle.value) {
+    if (item.isDir) {
+      stack.value.push(item.name)
+      refreshPath()
+      items.value = []
+      load()
+    } else {
+      showRecycleActions(item)
+    }
+    return
+  }
   if (item.isDir) {
     stack.value.push(item.name)
     refreshPath()
@@ -104,9 +124,107 @@ function openItem(item: FileItem) {
   }
 }
 
-/** 长按文件夹：可直接把整个目录备份到本机 */
+// ---------------- 回收站 ----------------
+
+/** 进入某个共享文件夹的回收站（#recycle） */
+function openRecycle(item: FileItem) {
+  inRecycle.value = true
+  recycleShare.value = '/' + item.name
+  stack.value = [item.name, '#recycle']
+  refreshPath()
+  items.value = []
+  errorMsg.value = ''
+  load()
+}
+
+/** 回收站里的文件：还原 / 彻底删除 */
+function showRecycleActions(item: FileItem) {
+  uni.showActionSheet({
+    itemList: ['还原到共享根目录', '彻底删除'],
+    success: async (res) => {
+      if (res.tapIndex === 0) {
+        await restoreItem(item)
+      } else {
+        confirmPurge(item)
+      }
+    },
+  })
+}
+
+async function restoreItem(item: FileItem) {
+  // /photo/#recycle/2024/a.jpg → 还原到 /photo
+  const share = recycleShare.value
+  if (share.length === 0) return
+  uni.showLoading({ title: '还原中', mask: true } as any)
+  try {
+    await api.copyMove([item.path], share, true, true)
+    uni.hideLoading()
+    uni.showToast({ title: '已还原到 ' + share, icon: 'none' })
+    load()
+  } catch (e) {
+    uni.hideLoading()
+    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+  }
+}
+
+function confirmPurge(item: FileItem) {
+  uni.showModal({
+    title: '彻底删除',
+    content: '确定永久删除 ' + item.name + '？此操作不可恢复。',
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await api.deleteFiles([item.path])
+        uni.showToast({ title: '已删除', icon: 'none' })
+        load()
+      } catch (e) {
+        uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+      }
+    },
+  })
+}
+
+function emptyRecycle() {
+  const share = recycleShare.value
+  if (share.length === 0) return
+  uni.showModal({
+    title: '清空回收站',
+    content: '将永久删除 ' + share + '/#recycle 下的全部内容，不可恢复。',
+    success: async (res) => {
+      if (!res.confirm) return
+      uni.showLoading({ title: '清理中', mask: true } as any)
+      try {
+        await api.deleteFiles([share + '/#recycle'])
+        uni.hideLoading()
+        uni.showToast({ title: '回收站已清空', icon: 'none' })
+        items.value = []
+        load()
+      } catch (e) {
+        uni.hideLoading()
+        uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+      }
+    },
+  })
+}
+
+/** 长按文件夹：可直接把整个目录备份到本机；根目录的共享还能打开回收站 */
 function onLongPress(item: FileItem) {
   if (!item.isDir) return
+  if (stack.value.length === 0) {
+    uni.showActionSheet({
+      itemList: ['进入文件夹', '打开回收站', '备份此文件夹到本机'],
+      success: (res) => {
+        if (res.tapIndex === 0) {
+          openItem(item)
+        } else if (res.tapIndex === 1) {
+          openRecycle(item)
+        } else {
+          backupFolderToDevice(item)
+        }
+      },
+    })
+    return
+  }
   uni.showActionSheet({
     itemList: ['进入文件夹', '备份此文件夹到本机'],
     success: (res) => {
@@ -143,6 +261,11 @@ async function backupFolderToDevice(item: FileItem) {
 function goUp() {
   if (stack.value.length === 0) return
   stack.value.pop()
+  // 从 #recycle 退回共享根时，退出回收站视图（清空按钮、菜单都跟着复位）
+  if (inRecycle.value && stack.value.length <= 1) {
+    inRecycle.value = false
+    recycleShare.value = ''
+  }
   refreshPath()
   items.value = []
   load()
@@ -250,6 +373,11 @@ function createFolder() {
     font-size: 16px;
     color: #1e6bb8;
     padding: 4px 10px;
+  }
+  .recycle-clear {
+    font-size: 12px;
+    color: #d94838;
+    padding: 4px 4px 4px 8px;
   }
   .list {
     flex: 1;
