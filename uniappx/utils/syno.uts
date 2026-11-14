@@ -1540,7 +1540,14 @@ export class SynoApi {
   }
 
   async deleteFiles(paths: string[]) {
-    await this.call('SYNO.FileStation.Delete', 'start', { path: paths, recursive: 'true' })
+    // 必须传 JSON 数组字符串：encodeParams 会把数组展开成重复键 path=a&path=b，
+    // DSM 只认其中一条，导致多选删除只删掉一个
+    let list = ''
+    for (let i = 0; i < paths.length; i++) {
+      if (i > 0) list = list + ','
+      list = list + '"' + paths[i].replace(/"/g, '\\"') + '"'
+    }
+    await this.call('SYNO.FileStation.Delete', 'start', { path: '[' + list + ']', recursive: 'true' })
   }
 
   /**
@@ -1553,9 +1560,10 @@ export class SynoApi {
       if (i > 0) list = list + ','
       list = list + '"' + paths[i].replace(/"/g, '\\"') + '"'
     }
+    // 参数名是 dest_folder_path（不是 dest_folder），传错会返回 400 参数无效
     await this.call('SYNO.FileStation.CopyMove', 'start', {
       path: '[' + list + ']',
-      dest_folder: destFolder,
+      dest_folder_path: destFolder,
       remove_src: removeSrc ? 'true' : 'false',
       overwrite: overwrite ? 'true' : 'false',
     }, 3)

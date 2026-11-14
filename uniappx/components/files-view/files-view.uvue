@@ -1,9 +1,17 @@
 <template>
   <view class="files-page">
+    <!-- 选择模式工具条 -->
+    <view v-if="selectMode" class="sel-bar">
+      <text class="sel-cancel" @click="exitSelect">取消</text>
+      <text class="sel-count">已选 {{ selectedPaths.length }} 项</text>
+      <text class="sel-all" @click="toggleSelectAll">{{ allSelected() ? '取消全选' : '全选' }}</text>
+    </view>
+
     <!-- 路径栏 -->
-    <view class="path-bar">
+    <view v-if="selectMode === false" class="path-bar">
       <text class="up-btn" :class="stack.length > 0 ? 'up-btn-on' : 'up-btn-off'" @click="goUp">↑</text>
       <text class="path-text">{{ inRecycle ? recycleShare + ' · 回收站' : currentPath }}</text>
+      <text v-if="items.length > 0" class="bar-btn" @click="enterSelect">☑</text>
       <text v-if="inRecycle === false" class="bar-btn" @click="openSearch">🔍</text>
       <text v-if="inRecycle === false" class="bar-btn" @click="pickSort">⇅</text>
       <text v-if="inRecycle" class="recycle-clear" @click="emptyRecycle">清空</text>
@@ -19,13 +27,21 @@
 
     <scroll-view class="list" direction="vertical">
       <text v-if="errorMsg.length > 0" class="text-error error-center">{{ errorMsg }}</text>
-      <view v-for="(item, index) in items" :key="index" class="file-row" @click="openItem(item)" @longpress="onLongPress(item)">
+      <view
+        v-for="(item, index) in items"
+        :key="index"
+        class="file-row"
+        :class="isSelected(item.path) ? 'file-row-on' : ''"
+        @click="onRowClick(item)"
+        @longpress="onLongPress(item)"
+      >
         <text class="file-icon">{{ item.isDir ? '📁' : '📄' }}</text>
         <view class="file-info">
           <text class="file-name">{{ item.name }}</text>
           <text v-if="item.isDir === false" class="text-secondary" max-lines="1">{{ keyword.length > 0 ? item.path : formatSize(item.size) }}</text>
         </view>
-        <text v-if="item.isDir === true" class="chevron">›</text>
+        <text v-if="selectMode && selectable(item)" class="check" :class="isSelected(item.path) ? 'check-on' : 'check-off'">{{ isSelected(item.path) ? '✓' : '' }}</text>
+        <text v-else-if="item.isDir === true || selectMode" class="chevron">›</text>
       </view>
       <view v-if="items.length === 0 && errorMsg.length === 0" class="empty-box">
         <text class="text-secondary">暂无内容</text>
@@ -71,8 +87,16 @@
       @close="pickerOpen = false"
     />
 
-    <!-- 新建文件夹 FAB（回收站里不允许新建） -->
-    <view v-if="stack.length > 0 && inRecycle === false" class="fab" @click="createFolder">
+    <!-- 批量操作条 -->
+    <view v-if="selectMode && selectedPaths.length > 0" class="batch-bar">
+      <text class="batch-btn" @click="batchDownload">备份到本机</text>
+      <text class="batch-btn" @click="batchMove('move')">移动</text>
+      <text class="batch-btn" @click="batchMove('copy')">复制</text>
+      <text class="batch-btn batch-danger" @click="batchDelete">删除</text>
+    </view>
+
+    <!-- 新建文件夹 FAB（回收站里不允许新建；选择模式下不显示） -->
+    <view v-if="stack.length > 0 && inRecycle === false && selectMode === false" class="fab" @click="createFolder">
       <text class="fab-text">＋📁</text>
     </view>
   </view>
@@ -91,6 +115,10 @@ const rawItems = ref<Array<FileItem>>([])
 const errorMsg = ref('')
 const loading = ref(false)
 const actionItem = ref<FileItem | null>(null)
+/** 多选模式 */
+const selectMode = ref(false)
+/** 已选中的文件/目录绝对路径 */
+const selectedPaths = ref<Array<string>>([])
 const shareLink = ref('')
 
 const currentPath = ref('/')
@@ -326,12 +354,12 @@ function renameItem(item: FileItem) {
 
 const pickerOpen = ref(false)
 const pickerTitle = ref('选择目标文件夹')
-let pendingItem: FileItem | null = null
+let pendingPaths: Array<string> = []
 let moveMode = 'move'
 
 function startMove(item: FileItem, mode: string) {
   actionItem.value = null
-  pendingItem = item
+  pendingPaths = [item.path]
   moveMode = mode
   pickerTitle.value = mode === 'move' ? '移动到…' : '复制到…'
   pickerOpen.value = true
@@ -339,20 +367,138 @@ function startMove(item: FileItem, mode: string) {
 
 async function onPickDest(dest: string) {
   pickerOpen.value = false
-  const item = pendingItem
-  pendingItem = null
-  if (item == null) return
+  const paths = pendingPaths
+  pendingPaths = []
+  if (paths.length === 0) return
   const isMove = moveMode === 'move'
   uni.showLoading({ title: isMove ? '移动中' : '复制中', mask: true } as any)
   try {
-    await api.copyMove([item.path], dest, isMove, false)
+    await api.copyMove(paths, dest, isMove, false)
     uni.hideLoading()
-    uni.showToast({ title: isMove ? '已移动' : '已复制', icon: 'none' })
+    uni.showToast({ title: (isMove ? '已移动 ' : '已复制 ') + paths.length + ' 项', icon: 'none' })
+    exitSelect()
     load()
   } catch (e) {
     uni.hideLoading()
     uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
   }
+}
+
+// ---------------- 多选批量操作 ----------------
+
+function enterSelect() {
+  selectMode.value = true
+  selectedPaths.value = []
+}
+
+function exitSelect() {
+  selectMode.value = false
+  selectedPaths.value = []
+}
+
+/** 系统目录（#recycle、@eaDir 等）不参与批量操作 */
+function selectable(item: FileItem): boolean {
+  return item.name !== '#recycle' && item.name !== '@eaDir' && item.name !== '@Recycle'
+}
+
+function isSelected(path: string): boolean {
+  return selectedPaths.value.indexOf(path) >= 0
+}
+
+function toggleSelect(path: string) {
+  const idx = selectedPaths.value.indexOf(path)
+  if (idx >= 0) {
+    selectedPaths.value.splice(idx, 1)
+  } else {
+    selectedPaths.value.push(path)
+  }
+}
+
+function allSelected(): boolean {
+  return items.value.length > 0 && selectedPaths.value.length >= items.value.length
+}
+
+function toggleSelectAll() {
+  if (allSelected()) {
+    selectedPaths.value = []
+    return
+  }
+  const next: Array<string> = []
+  for (let i = 0; i < items.value.length; i++) {
+    if (selectable(items.value[i])) {
+      next.push(items.value[i].path)
+    }
+  }
+  selectedPaths.value = next
+}
+
+/** 行点击：选择模式下切换勾选，平时进入目录/弹操作层 */
+function onRowClick(item: FileItem) {
+  if (selectMode.value) {
+    if (!selectable(item)) {
+      uni.showToast({ title: '系统目录不支持批量操作', icon: 'none' })
+      return
+    }
+    toggleSelect(item.path)
+    return
+  }
+  openItem(item)
+}
+
+/** 批量删除（一次请求，DSM 的 path 支持数组） */
+function batchDelete() {
+  const paths = selectedPaths.value.slice()
+  if (paths.length === 0) return
+  uni.showModal({
+    title: '批量删除',
+    content: '确定删除选中的 ' + paths.length + ' 项？可在回收站恢复（若已启用）。',
+    success: async (res) => {
+      if (!res.confirm) return
+      uni.showLoading({ title: '删除中', mask: true } as any)
+      try {
+        await api.deleteFiles(paths)
+        uni.hideLoading()
+        uni.showToast({ title: '已删除 ' + paths.length + ' 项', icon: 'none' })
+        exitSelect()
+        load()
+      } catch (e) {
+        uni.hideLoading()
+        uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+      }
+    },
+  })
+}
+
+/** 批量备份到本机 = 逐个加入下载队列（下载管理页可看进度） */
+function batchDownload() {
+  const paths = selectedPaths.value.slice()
+  if (paths.length === 0) return
+  let n = 0
+  for (let i = 0; i < items.value.length; i++) {
+    const it = items.value[i]
+    if (paths.indexOf(it.path) < 0) continue
+    if (it.isDir) {
+      // 目录不支持单文件下载，跳过并提示
+      continue
+    }
+    startDownload(api.downloadFileUrl(it.path), it.name, it.path)
+    n = n + 1
+  }
+  if (n === 0) {
+    uni.showToast({ title: '选中的是文件夹，请用长按「备份到本机」', icon: 'none' })
+    return
+  }
+  uni.showToast({ title: '已加入下载列表 ' + n + ' 项', icon: 'none' })
+  exitSelect()
+}
+
+function batchMove(mode: string) {
+  const paths = selectedPaths.value.slice()
+  if (paths.length === 0) return
+  pendingPaths = paths
+  moveMode = mode
+  pickerTitle.value = (mode === 'move' ? '移动到…（' : '复制到…（') + paths.length + ' 项）'
+  pickerOpen.value = true
 }
 
 // ---------------- 排序 ----------------
@@ -664,6 +810,63 @@ function createFolder() {
     font-size: 15px;
     color: #1e6bb8;
     padding: 4px 8px;
+  }
+  .sel-bar {
+    flex-direction: row;
+    align-items: center;
+    background-color: #1e6bb8;
+    padding: 10px 12px;
+  }
+  .sel-cancel {
+    font-size: 14px;
+    color: #ffffff;
+    padding-right: 12px;
+  }
+  .sel-count {
+    flex: 1;
+    font-size: 14px;
+    color: #ffffff;
+  }
+  .sel-all {
+    font-size: 14px;
+    color: #ffffff;
+    padding-left: 12px;
+  }
+  .file-row-on {
+    background-color: #eaf2fb;
+  }
+  .check {
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    text-align: center;
+    font-size: 13px;
+    line-height: 22px;
+  }
+  .check-on {
+    background-color: #1e6bb8;
+    color: #ffffff;
+  }
+  .check-off {
+    border: 1px solid #c4c9d1;
+    color: #c4c9d1;
+  }
+  .batch-bar {
+    flex-direction: row;
+    align-items: center;
+    background-color: #ffffff;
+    border-top: 1px solid #eef0f3;
+    padding: 4px 6px;
+  }
+  .batch-btn {
+    flex: 1;
+    text-align: center;
+    font-size: 12px;
+    color: #1e6bb8;
+    padding: 10px 2px;
+  }
+  .batch-danger {
+    color: #d94838;
   }
   .state-bar {
     flex-direction: row;
