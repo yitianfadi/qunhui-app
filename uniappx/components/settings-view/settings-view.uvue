@@ -23,6 +23,17 @@
       </view>
     </view>
 
+    <!-- 账号 -->
+    <text class="group-title">账号</text>
+    <view class="card">
+      <view class="row" @click="switchAccount">
+        <text class="row-icon">👤</text>
+        <text class="row-title">切换账号</text>
+        <text class="row-value">{{ accountHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+    </view>
+
     <!-- 传输 -->
     <text class="group-title">传输</text>
     <view class="card">
@@ -85,7 +96,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { api } from '@/utils/syno.uts'
+import { api, NasAccount, SynoError } from '@/utils/syno.uts'
 import { dlActiveCount, dlDoneCount } from '@/utils/download_manager.uts'
 import { upActiveCount, upDoneCount } from '@/utils/upload_manager.uts'
 import {
@@ -205,6 +216,108 @@ function openDownloads() {
 
 function openBackup() {
   uni.navigateTo({ url: '/pages/backup/backup' })
+}
+
+// ---------------- 多账号切换 ----------------
+
+function loadSavedAccounts(): Array<Record<string, any>> {
+  const raw = uni.getStorageSync('nas_accounts') as string
+  if (raw == null || raw.length === 0) return []
+  try {
+    return JSON.parse(raw) as Array<Record<string, any>>
+  } catch (e) {
+    return []
+  }
+}
+
+const accountCount = loadSavedAccounts().length
+
+const accountHint = accountCount > 1 ? accountCount.toString() + ' 个已保存' : '添加或切换'
+
+function goLoginWithPrefill(acc: Record<string, any> | null) {
+  if (acc != null) {
+    const pre: Record<string, any> = {
+      host: acc['host'] ?? '',
+      port: acc['port'] ?? 5000,
+      protocol: acc['protocol'] ?? 'http',
+      username: acc['username'] ?? '',
+      qcId: acc['qcId'] ?? '',
+      transport: acc['transport'] ?? 'auto',
+    }
+    uni.setStorageSync('login_prefill', JSON.stringify(pre))
+  }
+  // 先清掉当前会话，登录页 onMounted 才不会直接跳回主页
+  api.clear()
+  uni.reLaunch({ url: '/pages/login/login' })
+}
+
+function switchAccount() {
+  const list = loadSavedAccounts()
+  if (list.length === 0) {
+    uni.showModal({
+      title: '还没有保存的账号',
+      content: '登录页会记住用过的账号。现在去添加一个新账号？',
+      success: (res) => {
+        if (res.confirm) goLoginWithPrefill(null)
+      },
+    })
+    return
+  }
+  const items: Array<string> = []
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i]
+    const proto = typeof a['protocol'] === 'string' ? (a['protocol'] as string) : 'http'
+    items.push((a['username'] as string) + ' @ ' + (a['host'] as string) + ':' + String(a['port']) + ' (' + proto + ')')
+  }
+  items.push('＋ 添加新账号…')
+  uni.showActionSheet({
+    itemList: items,
+    success: (res) => {
+      if (res.tapIndex >= list.length) {
+        goLoginWithPrefill(null)
+        return
+      }
+      doSwitch(list[res.tapIndex])
+    },
+  })
+}
+
+async function doSwitch(acc: Record<string, any>) {
+  const pwd = typeof acc['password'] === 'string' ? (acc['password'] as string) : ''
+  if (pwd.length === 0) {
+    // 没存密码的旧记录：带上地址去登录页填密码
+    goLoginWithPrefill(acc)
+    return
+  }
+  const otp = typeof acc['otp'] === 'string' ? (acc['otp'] as string) : ''
+  uni.showLoading({ title: '切换中', mask: true } as any)
+  try {
+    const na = {
+      id: acc['id'] as string,
+      name: acc['name'] as string,
+      protocol: acc['protocol'] as string,
+      host: acc['host'] as string,
+      port: acc['port'] as number,
+      username: acc['username'] as string,
+      qcId: acc['qcId'] as string,
+      transport: acc['transport'] as string,
+    } as NasAccount
+    await api.connectAuto(na, pwd, otp)
+    uni.hideLoading()
+    uni.showToast({ title: '已切换到 ' + na.username, icon: 'none' })
+    // 重新加载首页，让各页面重新读取当前账号
+    setTimeout(() => {
+      uni.reLaunch({ url: '/pages/home/home' })
+    }, 600)
+  } catch (e) {
+    uni.hideLoading()
+    if (e instanceof SynoError && (e.code === 403 || e.code === 404)) {
+      // 需要动态验证码，去登录页补
+      goLoginWithPrefill(acc)
+      return
+    }
+    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+  }
 }
 
 function confirmLogout() {

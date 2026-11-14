@@ -32,6 +32,14 @@
         <input class="input" v-model="host" placeholder="192.168.1.10 或 DDNS 域名" />
       </view>
       <view class="field" v-if="transport !== 'quickconnect'">
+        <text class="label">协议</text>
+        <view class="seg">
+          <text class="seg-item" :class="protocol === 'http' ? 'seg-active' : ''" @click="setProtocol('http')">HTTP</text>
+          <text class="seg-item" :class="protocol === 'https' ? 'seg-active' : ''" @click="setProtocol('https')">HTTPS</text>
+        </view>
+        <text class="hint-text">HTTPS 需 NAS 已启用证书（DSM 默认 5001）。自签证书请在系统里信任后再用。</text>
+      </view>
+      <view class="field" v-if="transport !== 'quickconnect'">
         <text class="label">端口</text>
         <input class="input" v-model="port" placeholder="5000" />
       </view>
@@ -55,7 +63,7 @@
 
       <view v-if="accounts.length > 0" class="card saved-box">
         <text class="section-title">已保存账号</text>
-        <view v-for="(acc, index) in accounts" :key="index" class="saved-item" @click="applyAccount(acc)">
+        <view v-for="(acc, index) in accounts" :key="index" class="saved-item" @click="applyAccount(acc)" @longpress="removeAccount(acc)">
           <text class="saved-name">{{ acc.name }}</text>
           <text class="text-secondary">{{ acc.protocol }}://{{ acc.host }}:{{ acc.port }} · {{ acc.username }}</text>
         </view>
@@ -70,6 +78,7 @@ import { api, SynoError, NasAccount } from '@/utils/syno.uts'
 
 const host = ref('')
 const port = ref('5000')
+const protocol = ref('http')
 const qcId = ref('')
 const transport = ref('auto')
 const username = ref('')
@@ -82,10 +91,40 @@ const accounts = ref<Array<Record<string, any>>>(loadAccounts())
 
 // 已有有效会话时自动进入主页（刷新/重开应用不重复登录）
 onMounted(() => {
+  // 「切换账号」会写入预填信息，进来先套上
+  const pre = uni.getStorageSync('login_prefill') as string
+  if (pre != null && pre.length > 0) {
+    try {
+      const o = JSON.parse(pre) as Record<string, any>
+      if (typeof o['host'] === 'string') host.value = o['host'] as string
+      if (o['port'] != null) port.value = String(o['port'])
+      if (typeof o['protocol'] === 'string') protocol.value = o['protocol'] as string
+      if (typeof o['username'] === 'string') username.value = o['username'] as string
+      if (typeof o['qcId'] === 'string') qcId.value = o['qcId'] as string
+      if (typeof o['transport'] === 'string') transport.value = o['transport'] as string
+    } catch (e) {
+      // 预填内容坏了就忽略
+    }
+    uni.removeStorageSync('login_prefill')
+  }
   if (api.loggedIn) {
     uni.reLaunch({ url: '/pages/home/home' })
   }
 })
+
+/** 切换协议时顺带把端口换成对应默认值，避免 https 连 5000 端口 */
+function setProtocol(p: string) {
+  protocol.value = p
+  const cur = parseInt(port.value)
+  if (isNaN(cur)) {
+    port.value = p === 'https' ? '5001' : '5000'
+    return
+  }
+  if (p === 'https' && cur === 5000) port.value = '5001'
+  if (p === 'https' && cur === 80) port.value = '443'
+  if (p === 'http' && cur === 5001) port.value = '5000'
+  if (p === 'http' && cur === 443) port.value = '80'
+}
 
 function loadAccounts(): Array<Record<string, any>> {
   const raw = uni.getStorageSync('nas_accounts') as string
@@ -114,11 +153,30 @@ if (loc.hostname != null) {
 
 function applyAccount(acc: Record<string, any>) {
   host.value = acc['host'] as string
+  protocol.value = typeof acc['protocol'] === 'string' ? (acc['protocol'] as string) : 'http'
   port.value = String(acc['port'])
   username.value = acc['username'] as string
   qcId.value = typeof acc['qcId'] === 'string' ? (acc['qcId'] as string) : ''
   const t = typeof acc['transport'] === 'string' ? (acc['transport'] as string) : 'auto'
   transport.value = t.length > 0 ? t : 'auto'
+}
+
+/** 长按已保存账号：删除记录（不影响 NAS 上的任何数据） */
+function removeAccount(acc: Record<string, any>) {
+  uni.showModal({
+    title: '删除已保存账号',
+    content: '仅删除本机保存的 ' + (acc['name'] as string) + ' 登录信息，不影响 NAS。',
+    success: (res) => {
+      if (!res.confirm) return
+      const next: Array<Record<string, any>> = []
+      for (let i = 0; i < accounts.value.length; i++) {
+        if (accounts.value[i]['id'] !== acc['id']) next.push(accounts.value[i])
+      }
+      accounts.value = next
+      saveAccounts()
+      uni.showToast({ title: '已删除', icon: 'none' })
+    },
+  })
 }
 
 async function onLogin() {
@@ -138,7 +196,7 @@ async function onLogin() {
     const acc = {
       id: host.value + ':' + username.value,
       name: host.value.length > 0 ? host.value : qcId.value,
-      protocol: 'http',
+      protocol: protocol.value,
       host: host.value.trim(),
       port: isNaN(portNum) ? 5000 : portNum,
       username: username.value.trim(),
@@ -147,12 +205,17 @@ async function onLogin() {
     }
     // 统一入口：按模式自动尝试 直连 → LAN → WAN → QuickConnect 中继，成功后记住可用通道
     await api.connectAuto(acc as NasAccount, password.value, otp.value.trim())
-    // 保存账号列表
+    // 保存账号列表（连同密码，供设置页「切换账号」直接重连；本机明文存储，与已保存的会话一致）
+    const saved = acc as Record<string, any>
+    saved['password'] = password.value
+    saved['otp'] = otp.value.trim()
     const exists = accounts.value.findIndex((a) => a['id'] === acc.id)
     if (exists < 0) {
-      accounts.value.push(acc as Record<string, any>)
-      saveAccounts()
+      accounts.value.push(saved)
+    } else {
+      accounts.value[exists] = saved
     }
+    saveAccounts()
     uni.reLaunch({ url: '/pages/home/home' })
   } catch (e) {
     if (e instanceof SynoError) {
@@ -236,6 +299,11 @@ async function onLogin() {
     font-size: 13px;
     color: #666666;
     margin-bottom: 6px;
+  }
+  .hint-text {
+    font-size: 11px;
+    color: #9aa0a8;
+    margin-top: 6px;
   }
   .input {
     height: 42px;
