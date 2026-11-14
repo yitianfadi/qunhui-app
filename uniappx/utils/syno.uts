@@ -48,6 +48,8 @@ export type FileItem = {
   isDir: boolean
   size: number
   modified: string
+  /** 修改时间（unix 毫秒），用于按时间排序；未知为 0 */
+  mtime: number
 }
 
 export type PhotoItem = {
@@ -195,6 +197,36 @@ function encodeParams(params: Record<string, any>): string {
     }
   }
   return parts.join('&')
+}
+
+/**
+ * DSM 文件对象 → FileItem。
+ * 蒸汽模式 bytecode 下 JSON 数值的 typeof 可能不是 'number'，这里做宽容解析。
+ */
+function toFileItem(f: any): FileItem {
+  const m = objOf(f) ?? {}
+  const add = objOf(m['additional']) ?? {}
+  const time = objOf(add['time'])
+  const path = strOf(m, 'path')
+  const mtime = time != null ? numOf(time, 'mtime') : 0
+  const rawSize = add['size']
+  let size = 0
+  if (typeof rawSize === 'number') {
+    size = rawSize as number
+  } else if (rawSize != null) {
+    const n = parseFloat(rawSize.toString())
+    if (!isNaN(n)) {
+      size = n
+    }
+  }
+  return {
+    name: path.split('/').pop() ?? path,
+    path: path,
+    isDir: m['isdir'] === true,
+    size: size,
+    modified: formatDateTime(mtime * 1000),
+    mtime: mtime * 1000,
+  }
 }
 
 // ---------------- API 客户端 ----------------
@@ -483,6 +515,7 @@ export class SynoApi {
       'SYNO.API.Auth', 'SYNO.FileStation.List', 'SYNO.FileStation.Info',
       'SYNO.FileStation.Download', 'SYNO.FileStation.Upload', 'SYNO.FileStation.Thumb',
       'SYNO.FileStation.CreateFolder', 'SYNO.FileStation.Rename', 'SYNO.FileStation.Delete',
+      'SYNO.FileStation.CopyMove', 'SYNO.FileStation.Search',
       'SYNO.FileStation.Share', 'SYNO.DownloadStation.Info', 'SYNO.DownloadStation.Task',
       'SYNO.Foto.Browse.Item', 'SYNO.Foto.Browse.Folder', 'SYNO.Foto.Browse.Album',
       'SYNO.Foto.Thumbnail', 'SYNO.Foto.Download', 'SYNO.FotoTeam.Browse.Item',
@@ -871,7 +904,7 @@ export class SynoApi {
         return shares.map((s: any): FileItem => {
           const m = objOf(s) ?? {}
           const path = strOf(m, 'path')
-          return { name: path.split('/').pop() ?? path, path: path, isDir: true, size: 0, modified: '' }
+          return { name: path.split('/').pop() ?? path, path: path, isDir: true, size: 0, modified: '', mtime: 0 }
         })
       } catch (e) {
         lastErr = e
@@ -894,29 +927,46 @@ export class SynoApi {
       additional: 'size,time',
     }, 1)
     const files = (data['files'] as any[]) ?? []
-    return files.map((f: any): FileItem => {
-      const m = objOf(f) ?? {}
-      const add = objOf(m['additional']) ?? {}
-      const time = objOf(add['time'])
-      const path = strOf(m, 'path')
-      const mtime = time != null ? numOf(time, 'mtime') : 0
-      // 蒸汽模式 bytecode 下 JSON 数值的 typeof 可能不是 'number'，做宽容解析
-      const rawSize = add['size']
-      let size = 0
-      if (typeof rawSize === 'number') {
-        size = rawSize as number
-      } else if (rawSize != null) {
-        const n = parseFloat(rawSize.toString())
-        if (!isNaN(n)) size = n
-      }
-      return {
-        name: path.split('/').pop() ?? path,
-        path: path,
-        isDir: m['isdir'] === true,
-        size: size,
-        modified: formatDateTime(mtime * 1000),
-      }
-    })
+    return files.map((f: any): FileItem => toFileItem(f))
+  }
+
+  // ---------------- 搜索（全盘，异步任务） ----------------
+
+  /**
+   * 发起搜索，返回 taskid。
+   * DSM 的 pattern 是「文件名通配符匹配」，只给关键词不会命中任何文件，
+   * 因此关键词不含 * / ? 时自动补成 *关键词*。
+   */
+  async searchStart(folderPath: string, pattern: string): Promise<string> {
+    let p = pattern
+    if (p.indexOf('*') < 0 && p.indexOf('?') < 0) {
+      p = '*' + p + '*'
+    }
+    // 实测（DSM 7.4）：start 用 v1 时 list 只会返回 finished、拿不到 files；
+    // start/list 统一 v2 才能出结果（v2 的 list 不返回 additional，所以搜索结果里显示路径而不是大小）
+    const data = await this.call('SYNO.FileStation.Search', 'start', {
+      folder_path: folderPath,
+      pattern: p,
+      recursive: 'true',
+    }, 2)
+    return strOf(data, 'taskid')
+  }
+
+  /** 拉取搜索结果（分页） */
+  async searchList(taskid: string, offset: number, limit: number): Promise<FileItem[]> {
+    const data = await this.call('SYNO.FileStation.Search', 'list', {
+      taskid: taskid,
+      offset: offset,
+      limit: limit,
+      additional: 'size,time',
+    }, 2)
+    const files = (data['files'] as any[]) ?? []
+    return files.map((f: any): FileItem => toFileItem(f))
+  }
+
+  /** 结束搜索任务（释放服务端资源） */
+  async searchStop(taskid: string) {
+    await this.call('SYNO.FileStation.Search', 'stop', { taskid: taskid })
   }
 
   downloadFileUrl(path: string): string {
@@ -1482,6 +1532,11 @@ export class SynoApi {
 
   async createFolder(folderPath: string, name: string) {
     await this.call('SYNO.FileStation.CreateFolder', 'create', { folder_path: folderPath, name: name })
+  }
+
+  /** 重命名（同目录改名，也可以用于移动：给 newName 带路径时部分版本支持） */
+  async rename(path: string, newName: string) {
+    await this.call('SYNO.FileStation.Rename', 'rename', { path: path, name: newName }, 2)
   }
 
   async deleteFiles(paths: string[]) {
