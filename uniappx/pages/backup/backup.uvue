@@ -499,6 +499,7 @@ function pickVideos(dest: string) {
       uni.showToast({ title: '已加入 ' + n + ' 个视频', icon: 'none' })
     })
     .catch((e: any) => {
+      clearPickGuard()
       uni.hideLoading()
       const msg = e instanceof Error ? e.message : String(e)
       uni.showToast({ title: '选择失败：' + msg, icon: 'none' })
@@ -546,6 +547,31 @@ function joinFolder(base: string, sub: string): string {
     return b
   }
   return b + '/' + sub
+}
+
+/**
+ * 系统文件选择器的超时保护。
+ *
+ * 插件通过 startActivityForResult 拿结果；实测在某些路径下结果会丢
+ * （例如在选择器里点了「预览」跳到播放器、返回后），此时 Promise 永不 settle，
+ * 界面就一直卡在「打开文件选择器…」。这里加个兜底，超时后收起加载框并提示重试。
+ */
+let pickGuard = 0
+
+function clearPickGuard() {
+  if (pickGuard != 0) {
+    clearTimeout(pickGuard)
+    pickGuard = 0
+  }
+}
+
+function armPickGuard() {
+  clearPickGuard()
+  pickGuard = setTimeout(() => {
+    pickGuard = 0
+    uni.hideLoading()
+    uni.showToast({ title: '选择已取消，请重新点击', icon: 'none' })
+  }, 180000)
 }
 
 /** 目标目录归一化：去空白、补前导斜杠、折叠重复斜杠、去掉结尾斜杠（根目录除外） */
@@ -625,8 +651,10 @@ async function pickFolderUp() {
   // 清掉上一批残留的临时文件
   deviceClearCache()
   uni.showLoading({ title: '打开文件夹…', mask: true })
+  armPickGuard()
   devicePickDirectory(maxPick)
     .then((dir: DeviceDir) => {
+      clearPickGuard()
       uni.hideLoading()
       if (dir.files.length === 0) {
         uni.showToast({ title: '该文件夹内没有文件', icon: 'none' })
@@ -647,6 +675,7 @@ async function pickFolderUp() {
       })
     })
     .catch((e: any) => {
+      clearPickGuard()
       uni.hideLoading()
       const msg = e instanceof Error ? e.message : String(e)
       if (msg.indexOf('已取消') < 0) {
@@ -686,8 +715,10 @@ async function pickAnyFiles() {
   }
   const dest = destFolder.value
   uni.showLoading({ title: '打开文件选择器…', mask: true })
+  armPickGuard()
   devicePickFiles(20, '*/*')
     .then((files: Array<DeviceFile>) => {
+      clearPickGuard()
       uni.hideLoading()
       if (files.length === 0) {
         return
@@ -710,6 +741,7 @@ async function pickAnyFiles() {
       uni.showToast({ title: '已加入 ' + n + ' 个文件，开始排队上传', icon: 'none' })
     })
     .catch((e: any) => {
+      clearPickGuard()
       uni.hideLoading()
       const msg = e instanceof Error ? e.message : String(e)
       if (msg.indexOf('已取消') < 0) {

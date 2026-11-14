@@ -634,7 +634,19 @@ export class SynoApi {
           json = await this.postJsonBody(url2, p)
         } catch (err2) {
           if (err2 instanceof SynoError && err2.code === 100) {
-            json = await this.postFormJson(urlQ)
+            try {
+              json = await this.postFormJson(urlQ)
+            } catch (err3) {
+              // 三种方式都只拿到 HTML：多半是 sid 失效后 DSM 直接回了登录页/错误页
+              // （并发登录、会话被踢都会出现）→ 密码还在就静默重登一次再试
+              if (this.password.length > 0) {
+                await this.login(this.password, '')
+                p['_sid'] = this.sid
+                json = await this.getJson(this.baseUrl + this.pathPrefix + '/' + e.path + '?' + encodeParams(p))
+              } else {
+                throw err3
+              }
+            }
           } else {
             throw err2
           }

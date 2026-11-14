@@ -3,7 +3,7 @@
 // Web / iOS 上所有方法都会以「不支持」拒绝，调用方需自行降级
 
 // #ifdef APP-ANDROID
-import { pickFiles, pickDirectory, exportToCache, clearCache, nativeUpload, cancelNativeUpload } from '@/uni_modules/qh-file-picker'
+import { pickFiles, pickDirectory, exportToCache, clearCache, nativeUpload, cancelNativeUpload, nativeUploadProgress } from '@/uni_modules/qh-file-picker'
 // #endif
 
 /** 手机上的一个文件（content:// 地址） */
@@ -160,6 +160,29 @@ export function deviceNativeUpload(
 ): Promise<NativeUploadResponse> {
   return new Promise<NativeUploadResponse>((resolve, reject) => {
     // #ifdef APP-ANDROID
+    // 进度改用「轮询」而不是回调：实测在后台线程里调用 JS 的 onProgress 一次也到不了
+    // JS（界面永远停在 0%），所以插件另外暴露了 nativeUploadProgress()，这里定时读。
+    let pollTimer = 0
+    let lastPercent = -1
+    const stopPoll = () => {
+      if (pollTimer != 0) {
+        clearTimeout(pollTimer)
+        pollTimer = 0
+      }
+    }
+    const poll = () => {
+      let p = -1
+      try {
+        p = nativeUploadProgress()
+      } catch (e) {
+        p = -1
+      }
+      if (p >= 0 && p != lastPercent && p < 100) {
+        lastPercent = p
+        onProgress(p)
+      }
+      pollTimer = setTimeout(poll, 400)
+    }
     try {
       nativeUpload({
         url: url,
@@ -168,9 +191,17 @@ export function deviceNativeUpload(
         filePath: filePath,
         fileName: fileName,
         onProgress: (p: number) => {
-          onProgress(p)
+          // 基座若能把回调送过来就先用着（属于加餐，不是主路径）
+          if (p > lastPercent && p < 100) {
+            lastPercent = p
+            onProgress(p)
+          }
         },
         success: (res: any) => {
+          stopPoll()
+          if (lastPercent < 100) {
+            onProgress(100)
+          }
           const out: NativeUploadResponse = {
             statusCode: typeof res.statusCode === 'number' ? res.statusCode : 0,
             data: typeof res.data === 'string' ? res.data : '',
@@ -178,11 +209,15 @@ export function deviceNativeUpload(
           resolve(out)
         },
         fail: (err: any) => {
+          stopPoll()
           const msg = err != null && err.errMsg != null ? String(err.errMsg) : '上传失败'
           reject(new Error(msg))
         },
       })
+      // 上传线程已启动，开始轮询进度
+      poll()
     } catch (e) {
+      stopPoll()
       // 当前基座里没有这个方法（还是旧基座）时，调用会直接抛异常。
       // 用固定前缀告诉上层「是插件缺失」，可以安全回退到 uni.uploadFile。
       const msg = e instanceof Error ? e.message : String(e)

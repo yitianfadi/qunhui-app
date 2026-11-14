@@ -41,6 +41,7 @@ import {
   ClearCacheResult,
   NativeUpload,
   CancelNativeUpload,
+  NativeUploadProgress,
   NativeUploadOptions,
   NativeUploadResult
 } from '../interface.uts'
@@ -480,6 +481,21 @@ let activeAborted = false
 let pendingOptions: NativeUploadOptions | null = null
 let pendingFile: File | null = null
 
+/**
+ * 当前上传进度（0-95 表示文件正文发送中，-1 表示没有进行中的任务）。
+ *
+ * 为什么要单独存一份：nativeUpload 在后台线程跑，实测从后台线程直接调用
+ * JS 的 onProgress 回调**一次也到不了 JS**（界面永远停在 0%），
+ * 因此改成由 JS 侧定时轮询这个值：每次轮询都是一次 JS→UTS 的同步调用，
+ * 跨线程能看到最新写入。
+ */
+let upPercent: number = -1
+
+/** 查询当前上传进度（0-100）；没有进行中的上传时返回 -1 —— 供 JS 轮询 */
+export const nativeUploadProgress: NativeUploadProgress = function (): number {
+  return upPercent
+}
+
 /** 中断正在进行的上传 */
 export const cancelNativeUpload: CancelNativeUpload = function () {
   activeAborted = true
@@ -564,6 +580,7 @@ function doUpload(options: NativeUploadOptions, file: File) {
 
     const fileLen = file.length()
     const total = utf8Length(head) + utf8Length(tail) + fileLen.toDouble()
+    upPercent = 0
 
     const u = new URL(options.url)
     const c = u.openConnection() as HttpURLConnection
@@ -605,9 +622,10 @@ function doUpload(options: NativeUploadOptions, file: File) {
         if (p > 95) {
           p = 95
         }
-        // 64KB 一块，200MB 会有 3200 次进度事件；只在百分比变化时回调，避免刷爆 JS 线程
+        // 64KB 一块，200MB 会有 3200 次进度事件；只在百分比变化时更新
         if (p != lastPercent) {
           lastPercent = p
+          upPercent = p
           cb(p)
         }
       }
@@ -673,6 +691,8 @@ function doUpload(options: NativeUploadOptions, file: File) {
     if (activeConn == conn) {
       activeConn = null
     }
+    // 结束后复位：JS 侧轮询到 -1 就知道没有进行中的上传
+    upPercent = -1
   }
 }
 
