@@ -29,12 +29,14 @@
     align-items: center;
     font-size: 16px;
   }
+  /* 注意：App.uvue 全局样式里 color 用 var() 不生效（实测渲染成黑色），
+     所以这里保留固定色；需要跟随主题的文字类，在使用它的组件里各定义一份。 */
   .text-secondary {
-    color: var(--t3);
+    color: #8a8f99;
     font-size: 12px;
   }
   .text-error {
-    color: var(--danger);
+    color: #d94838;
     font-size: 13px;
   }
 </style>

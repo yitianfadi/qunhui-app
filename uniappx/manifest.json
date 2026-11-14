@@ -3,7 +3,7 @@
 	"appid": "__UNI__BCED876",
 	"description": "群晖 DSM 客户端：文件管理、照片相册、下载管理",
 	"versionName": "1.0.5",
-	"versionCode": "105",
+	"versionCode": 107,
 	"uni-app-x": {
 		"vapor": true,
 		"vapor-render-target": "bytecode",

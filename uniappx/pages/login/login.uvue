@@ -232,6 +232,16 @@ async function onLogin() {
 </script>
 
 <style>
+  /* 局部覆盖：全局同名类里的 var() 不解析，这里重定义一份让它跟随主题 */
+  .text-secondary {
+    color: var(--t3);
+    font-size: 12px;
+  }
+  .text-error {
+    color: var(--danger);
+    font-size: 13px;
+  }
+
   .page-bg {
     flex: 1;
     background-color: var(--bg);
@@ -309,6 +319,7 @@ async function onLogin() {
   .input {
     height: 42px;
     background-color: var(--card);
+    color: var(--t1);
     border-radius: 8px;
     padding: 0 12px;
     border: 1px solid var(--line2);

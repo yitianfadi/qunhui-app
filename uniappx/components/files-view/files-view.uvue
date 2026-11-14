@@ -773,6 +773,16 @@ function createFolder() {
 </script>
 
 <style>
+  /* 局部覆盖：全局同名类里的 var() 不解析，这里重定义一份让它跟随主题 */
+  .text-secondary {
+    color: var(--t3);
+    font-size: 12px;
+  }
+  .text-error {
+    color: var(--danger);
+    font-size: 13px;
+  }
+
   .files-page {
     flex: 1;
     flex-direction: column;

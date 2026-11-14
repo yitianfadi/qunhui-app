@@ -810,6 +810,8 @@ function openDownloadPage() {
     height: 40px;
     font-size: 14px;
     color: var(--t1);
+    /* input 默认白底，深色模式下必须显式覆盖，否则白底浅字看不清 */
+    background-color: var(--bg);
   }
   .path-value {
     flex: 1;
