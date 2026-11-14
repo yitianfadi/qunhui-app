@@ -3,7 +3,7 @@
 // Web / iOS 上所有方法都会以「不支持」拒绝，调用方需自行降级
 
 // #ifdef APP-ANDROID
-import { pickFiles, pickDirectory, exportToCache, clearCache } from '@/uni_modules/qh-file-picker'
+import { pickFiles, pickDirectory, exportToCache, clearCache, nativeUpload, cancelNativeUpload } from '@/uni_modules/qh-file-picker'
 // #endif
 
 /** 手机上的一个文件（content:// 地址） */
@@ -134,6 +134,78 @@ export function deviceExportToCache(uri: string, name: string): Promise<string> 
   })
 }
 
+/** 原生上传返回 */
+export type NativeUploadResponse = {
+  /** HTTP 状态码 */
+  statusCode: number
+  /** 响应正文（JSON 字符串） */
+  data: string
+}
+
+/**
+ * 原生流式 multipart 上传（参数段在前、文件段最后）。
+ *
+ * 为什么需要它：uni.uploadFile 固定把文件段排在 multipart 最前面，
+ * 而 DSM 的 SYNO.FileStation.Upload 遇到「文件段在前」直接返回 101；
+ * 换成 readFile 自己拼报文又会把整个文件读进内存（大视频必超上限）。
+ * 插件里用 HttpURLConnection 边读边发，内存与文件大小无关。
+ */
+export function deviceNativeUpload(
+  url: string,
+  sid: string,
+  destFolder: string,
+  filePath: string,
+  fileName: string,
+  onProgress: (percent: number) => void
+): Promise<NativeUploadResponse> {
+  return new Promise<NativeUploadResponse>((resolve, reject) => {
+    // #ifdef APP-ANDROID
+    try {
+      nativeUpload({
+        url: url,
+        sid: sid,
+        destFolder: destFolder,
+        filePath: filePath,
+        fileName: fileName,
+        onProgress: (p: number) => {
+          onProgress(p)
+        },
+        success: (res: any) => {
+          const out: NativeUploadResponse = {
+            statusCode: typeof res.statusCode === 'number' ? res.statusCode : 0,
+            data: typeof res.data === 'string' ? res.data : '',
+          }
+          resolve(out)
+        },
+        fail: (err: any) => {
+          const msg = err != null && err.errMsg != null ? String(err.errMsg) : '上传失败'
+          reject(new Error(msg))
+        },
+      })
+    } catch (e) {
+      // 当前基座里没有这个方法（还是旧基座）时，调用会直接抛异常。
+      // 用固定前缀告诉上层「是插件缺失」，可以安全回退到 uni.uploadFile。
+      const msg = e instanceof Error ? e.message : String(e)
+      reject(new Error('NATIVE_UNAVAILABLE:' + msg))
+    }
+    // #endif
+    // #ifndef APP-ANDROID
+    reject(new Error('当前平台不支持原生上传'))
+    // #endif
+  })
+}
+
+/** 中断原生上传 */
+export function deviceCancelNativeUpload() {
+  // #ifdef APP-ANDROID
+  try {
+    cancelNativeUpload()
+  } catch (e) {
+    // 忽略
+  }
+  // #endif
+}
+
 /** 清空导出的临时缓存文件 */
 export function deviceClearCache(): Promise<number> {
   return new Promise<number>((resolve, reject) => {
@@ -158,9 +230,16 @@ export function deviceClearCache(): Promise<number> {
  * 申请读取相册（图片/视频）的权限。
  *
  * Android 13+ 用 READ_MEDIA_IMAGES / READ_MEDIA_VIDEO，12 及以下用 READ_EXTERNAL_STORAGE。
- * 三个一起申请即可：系统会忽略当前版本不支持的项（grantedList 只返回支持的）。
  *
- * 返回 true 表示至少拿到一项读取权限；用户拒绝时返回 false（调用方应提示去设置里开）。
+ * 注意判定口径（这版修的就是这里）：**只有“明确永久拒绝”才算失败**。
+ * 之前用 `grantedList.length > 0` 判断，遇到下面三种情况会误报“没有权限”，
+ * 而实际上用户早就授权了：
+ *   1. 权限已授予时系统不再弹窗，回调里的 grantedList 可能是空数组；
+ *   2. Android 14 选「部分照片/视频」时授予的是 READ_MEDIA_VISUAL_USER_SELECTED，
+ *      不在请求列表里，grantedList 也是空；
+ *   3. 某些 ROM 的回调结构里根本没有 grantedList 字段。
+ * 返回 false 仅用于“用户勾了不再询问”的场景，其它情况一律放行，
+ * 真正的读取失败交给上传环节报准确错误。
  */
 export function ensureMediaReadPermission(): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
@@ -176,12 +255,26 @@ export function ensureMediaReadPermission(): Promise<boolean> {
       resolve(ok)
     }
     // #ifdef APP-ANDROID
+    // 1) 先读「当前」授权状态：已授权就直接放行，不再发起请求
+    let state = ''
     try {
-      // 该模块是可选模块：基座/安装包没编进去时回调不会触发，
-      // 因此必须有超时兜底，否则会卡在「点了没反应」
-      timer = setTimeout(() => {
-        done(true)
-      }, 2500)
+      const setting: any = uni.getAppAuthorizeSetting()
+      if (setting != null && setting.albumAuthorized != null) {
+        state = String(setting.albumAuthorized)
+      }
+    } catch (e) {
+      state = ''
+    }
+    if (state == 'authorized') {
+      done(true)
+      return
+    }
+    // 2) 未决定 / 被拒 → 请求一次；该模块是可选模块，没编进基座时回调不会触发，
+    //    所以必须有超时兜底，否则会卡在「点了没反应」
+    timer = setTimeout(() => {
+      done(true)
+    }, 2500)
+    try {
       uni.requestSystemPermission({
         permissions: [
           'android.permission.READ_MEDIA_IMAGES',
@@ -190,7 +283,13 @@ export function ensureMediaReadPermission(): Promise<boolean> {
         ],
         success: (res: any) => {
           const granted: Array<string> = res.grantedList ?? []
-          done(granted.length > 0)
+          if (granted.length > 0) {
+            done(true)
+            return
+          }
+          const deniedAlways: Array<string> = res.deniedAlwaysList ?? []
+          // 只有「勾了不再询问」才拦；其余（含拿不到列表）一律放行
+          done(deniedAlways.length == 0)
         },
         fail: () => {
           done(true)
@@ -204,6 +303,32 @@ export function ensureMediaReadPermission(): Promise<boolean> {
     done(true)
     // #endif
   })
+}
+
+/** 当前的相册授权状态：authorized / denied / not determined / unknown */
+export function getAlbumAuthorizeState(): string {
+  // #ifdef APP-ANDROID
+  try {
+    const setting: any = uni.getAppAuthorizeSetting()
+    if (setting != null && setting.albumAuthorized != null) {
+      return String(setting.albumAuthorized)
+    }
+  } catch (e) {
+    return 'unknown'
+  }
+  // #endif
+  return 'unknown'
+}
+
+/** 跳转到系统里本应用的权限设置页 */
+export function openAppAuthorizeSetting() {
+  // #ifdef APP-ANDROID
+  try {
+    uni.openAppAuthorizeSetting({} as any)
+  } catch (e) {
+    // 部分 ROM 没有该页面，忽略
+  }
+  // #endif
 }
 
 /**

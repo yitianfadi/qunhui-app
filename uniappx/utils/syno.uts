@@ -11,6 +11,10 @@
 
 // ---------------- 数据类型 ----------------
 
+// #ifdef APP-ANDROID
+import { deviceNativeUpload, deviceCancelNativeUpload } from '@/utils/device_picker.uts'
+// #endif
+
 export type ApiEntry = {
   api: string
   path: string
@@ -950,13 +954,29 @@ export class SynoApi {
     // 复制反而会在路径解析上多踩一次坑（FileSystemManager 把裸 /data/... 当相对路径拼到 www 下）。
     const uploadPath = this.toUniFsPath(localPath)
     const barePath = localPath.startsWith('file://') ? localPath.substring(7) : localPath
-    // 优先原生流式上传：内存占用与文件大小无关，几百 MB 的视频也能传
-    // （自拼报文要先 readFile 整个文件，受单文件读取上限约束，大视频必然失败）
+
+    // 上传链路（按可靠性排序）
+    // 1) 插件原生流式上传：参数段在前、文件段最后，边读边发（内存与文件大小无关）
+    // 2) uni.uploadFile：原生实现把文件段放在最前面，DSM 会返回 101（参数顺序不符）
+    // 3) readFile 自拼报文：整个文件读进内存，受单文件读取上限约束，只适合小文件
+    // #ifdef APP-ANDROID
+    try {
+      await this.uploadNative(url, destFolder, barePath, fileName, onProgress, onTask)
+      return
+    } catch (err) {
+      // 只有「插件方法不在当前基座里」才继续往下回退；真实业务错误（101/网络）直接抛出
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.indexOf('NATIVE_UNAVAILABLE') < 0) {
+        throw err
+      }
+    }
+    // #endif
+
     try {
       await this.postUploadNative(url, e.maxVersion, uploadPath, barePath, destFolder, onProgress, onTask, fileName)
       return
     } catch (err) {
-      // 101 = 参数无效：万一某个基座把文件段排在参数段之前，DSM 会拒绝。
+      // 101 = 参数无效：uni.uploadFile 把文件段排在参数段之前，DSM 会拒绝。
       // 这时回退到「自己拼 multipart」的老路径（受 readFile 大小上限约束，只适合小文件）。
       const isOrderIssue = err instanceof SynoError && (err as SynoError).code === 101
       if (!isOrderIssue) {
@@ -964,6 +984,60 @@ export class SynoApi {
       }
       await this.postUpload(url, e.maxVersion, uploadPath, destFolder, onProgress, onTask, fileName)
     }
+  }
+
+  /**
+   * 插件原生流式上传（Android）。
+   *
+   * 报文由插件拼：参数段在前、文件段最后、定长流式发送，
+   * 内存占用与文件大小无关，几百 MB 的视频也能传；进度按已发字节数回调。
+   */
+  private async uploadNative(
+    url: string,
+    destFolder: string,
+    absPath: string,
+    fileName: string,
+    onProgress: (percent: number) => void,
+    onTask: (task: any) => void
+  ): Promise<void> {
+    // #ifdef APP-ANDROID
+    const sep = url.indexOf('?') >= 0 ? '&' : '?'
+    const fullUrl = url + sep + '_sid=' + encodeURIComponent(this.sid)
+    // 先交出任务句柄，用户在上传过程中才能取消
+    onTask({
+      abort: () => {
+        deviceCancelNativeUpload()
+      },
+    } as any)
+    const res = await deviceNativeUpload(fullUrl, this.sid, destFolder, absPath, fileName, (p: number) => {
+      if (p > 0 && p < 100) {
+        onProgress(p)
+      }
+    })
+    const text = res.data
+    let json: Record<string, any> | null = null
+    if (text.length > 0) {
+      try {
+        json = JSON.parse(text) as Record<string, any>
+      } catch (err) {
+        json = null
+      }
+    }
+    if (json == null) {
+      if (res.statusCode >= 400) {
+        throw new SynoError(106, '上传失败：HTTP ' + res.statusCode)
+      }
+      throw new SynoError(100, '上传失败：响应不是 JSON（' + text.slice(0, 80) + '）')
+    }
+    if (json['success'] === true) {
+      onProgress(100)
+      return
+    }
+    throw this.parseError(json, 'SYNO.FileStation.Upload')
+    // #endif
+    // #ifndef APP-ANDROID
+    throw new SynoError(100, '当前平台不支持原生上传')
+    // #endif
   }
 
   /**

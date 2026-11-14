@@ -16,6 +16,14 @@ import DocumentsContract from 'android.provider.DocumentsContract'
 import File from 'java.io.File'
 import FileOutputStream from 'java.io.FileOutputStream'
 import InputStream from 'java.io.InputStream'
+import HttpURLConnection from 'java.net.HttpURLConnection'
+import URL from 'java.net.URL'
+import OutputStreamWriter from 'java.io.OutputStreamWriter'
+import FileInputStream from 'java.io.FileInputStream'
+import BufferedReader from 'java.io.BufferedReader'
+import InputStreamReader from 'java.io.InputStreamReader'
+import Thread from 'java.lang.Thread'
+import Runnable from 'java.lang.Runnable'
 
 import {
   PickFiles,
@@ -30,7 +38,11 @@ import {
   ExportedFile,
   ClearCache,
   ClearCacheOptions,
-  ClearCacheResult
+  ClearCacheResult,
+  NativeUpload,
+  CancelNativeUpload,
+  NativeUploadOptions,
+  NativeUploadResult
 } from '../interface.uts'
 import { QhPickerFailImpl } from '../unierror'
 
@@ -454,4 +466,236 @@ export const clearCache: ClearCache = function (options: ClearCacheOptions) {
     options.fail?.(err)
     options.complete?.(err)
   }
+}
+
+// ---------------------------------------------------------------------------
+// 原生流式 multipart 上传
+// ---------------------------------------------------------------------------
+
+/** 当前进行中的连接（同一时刻只保留一个上传任务） */
+let activeConn: HttpURLConnection | null = null
+/** 取消标记：置 true 后写文件循环会尽快退出 */
+let activeAborted = false
+/** 传给后台线程的任务参数 */
+let pendingOptions: NativeUploadOptions | null = null
+let pendingFile: File | null = null
+
+/** 中断正在进行的上传 */
+export const cancelNativeUpload: CancelNativeUpload = function () {
+  activeAborted = true
+  const c = activeConn
+  activeConn = null
+  if (c != null) {
+    try {
+      c.disconnect()
+    } catch (e) {
+      // 连接可能已关闭，忽略
+    }
+  }
+}
+
+/**
+ * 计算字符串按 UTF-8 编码后的字节数。
+ * 用来算 multipart 的 Content-Length（不能直接用 String.length，中文算 3 字节）。
+ */
+function utf8Length(s: string): number {
+  let n = 0
+  let i = 0
+  while (i < s.length) {
+    const raw = s.charCodeAt(i)
+    const c: number = raw != null ? (raw as number) : 0
+    if (c < 0x80) {
+      n = n + 1
+    } else if (c < 0x800) {
+      n = n + 2
+    } else if (c >= 0xD800 && c <= 0xDBFF) {
+      // 代理对（emoji 等）占 4 字节
+      n = n + 4
+      i = i + 1
+    } else {
+      n = n + 3
+    }
+    i = i + 1
+  }
+  return n
+}
+
+/** 后台线程的入口（Runnable 不能带构造参数，参数走模块级变量） */
+class UploadRunnable extends Runnable {
+  override run() {
+    const o = pendingOptions
+    const f = pendingFile
+    pendingOptions = null
+    pendingFile = null
+    if (o == null || f == null) {
+      return
+    }
+    doUpload(o, f)
+  }
+}
+
+/** 真正干活：拼报文 → 边读边发 → 读响应 */
+function doUpload(options: NativeUploadOptions, file: File) {
+  let conn: HttpURLConnection | null = null
+  let fin: FileInputStream | null = null
+  try {
+    const boundary = '----QunhuiBoundary' + Date.now().toString()
+    const fileName = safeName(options.fileName)
+
+    // 参数段必须排在文件段之前：DSM 收到「文件段在前」会直接返回 101
+    let head = ''
+    const fields: Array<Array<string>> = [
+      ['api', 'SYNO.FileStation.Upload'],
+      ['version', '2'],
+      ['method', 'upload'],
+      ['path', options.destFolder],
+      ['create_parents', 'true'],
+      ['overwrite', 'true']
+    ]
+    for (let i = 0; i < fields.length; i++) {
+      head = head + '--' + boundary + '\r\n'
+      head = head + 'Content-Disposition: form-data; name="' + fields[i][0] + '"\r\n\r\n'
+      head = head + fields[i][1] + '\r\n'
+    }
+    head = head + '--' + boundary + '\r\n'
+    head = head + 'Content-Disposition: form-data; name="file"; filename="' + fileName + '"\r\n'
+    head = head + 'Content-Type: application/octet-stream\r\n\r\n'
+    const tail = '\r\n--' + boundary + '--\r\n'
+
+    const fileLen = file.length()
+    const total = utf8Length(head) + utf8Length(tail) + fileLen.toDouble()
+
+    const u = new URL(options.url)
+    const c = u.openConnection() as HttpURLConnection
+    conn = c
+    activeConn = c
+    activeAborted = false
+    c.setRequestMethod('POST')
+    c.setDoOutput(true)
+    c.setConnectTimeout(20000)
+    c.setReadTimeout(1800000)
+    c.setRequestProperty('Cookie', 'id=' + options.sid)
+    c.setRequestProperty('Content-Type', 'multipart/form-data; boundary=' + boundary)
+    c.setRequestProperty('User-Agent', 'QunHuiApp/1.0 (Android)')
+    // 用定长模式：DSM 前面是 nginx，定长比 chunked 更稳，也不会一次性占内存
+    c.setFixedLengthStreamingMode(total.toLong())
+    c.connect()
+
+    const out = c.getOutputStream()
+    // head/tail 必须是 UTF-8 字节（文件名可能含中文），用 Writer 来做编码
+    const writer = new OutputStreamWriter(out, 'UTF-8')
+    writer.write(head)
+    writer.flush()
+
+    fin = new FileInputStream(file)
+    const buf = new ByteArray(BUF_SIZE.toInt())
+    let sent = 0
+    let lastPercent = -1
+    let len = fin.read(buf)
+    while (len > 0) {
+      if (activeAborted) {
+        throw new Error('已取消上传')
+      }
+      out.write(buf, 0, len.toInt())
+      sent = sent + len
+      const cb = options.onProgress
+      if (cb != null && total > 0) {
+        // 文件正文占 0~95%，剩下的给收尾与响应
+        let p = Math.floor((sent * 95) / total)
+        if (p > 95) {
+          p = 95
+        }
+        // 64KB 一块，200MB 会有 3200 次进度事件；只在百分比变化时回调，避免刷爆 JS 线程
+        if (p != lastPercent) {
+          lastPercent = p
+          cb(p)
+        }
+      }
+      len = fin.read(buf)
+    }
+    fin.close()
+    fin = null
+
+    writer.write(tail)
+    writer.flush()
+    writer.close()
+
+    const code = c.getResponseCode()
+    let stream: InputStream | null = null
+    if (code >= 400) {
+      stream = c.getErrorStream()
+    } else {
+      stream = c.getInputStream()
+    }
+    let body = ''
+    if (stream != null) {
+      const reader = new BufferedReader(new InputStreamReader(stream, 'UTF-8'))
+      let line = reader.readLine()
+      while (line != null) {
+        body = body + line + '\n'
+        line = reader.readLine()
+      }
+      reader.close()
+    }
+    const doneCb = options.onProgress
+    if (doneCb != null) {
+      doneCb(100)
+    }
+
+    const res: NativeUploadResult = {
+      errMsg: 'nativeUpload:ok',
+      statusCode: code,
+      data: body
+    }
+    options.success?.(res)
+    options.complete?.(res)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : e.toString()
+    const err = new QhPickerFailImpl(9020007)
+    err.errMsg = '上传中断：' + msg
+    options.fail?.(err)
+    options.complete?.(err)
+  } finally {
+    if (fin != null) {
+      try {
+        fin!.close()
+      } catch (e2) {
+        // 忽略
+      }
+    }
+    if (conn != null) {
+      try {
+        conn!.disconnect()
+      } catch (e3) {
+        // 忽略
+      }
+    }
+    if (activeConn == conn) {
+      activeConn = null
+    }
+  }
+}
+
+/**
+ * 原生流式上传：参数段在前、文件段最后，边读边发（内存与文件大小无关）。
+ * 后台线程执行，进度通过 onProgress 回传，结果通过 success/fail 回传。
+ */
+export const nativeUpload: NativeUpload = function (options: NativeUploadOptions) {
+  const f = new File(options.filePath)
+  if (!f.exists()) {
+    const err = new QhPickerFailImpl(9020008)
+    options.fail?.(err)
+    options.complete?.(err)
+    return
+  }
+  if (!f.canRead()) {
+    const err = new QhPickerFailImpl(9020006)
+    options.fail?.(err)
+    options.complete?.(err)
+    return
+  }
+  pendingOptions = options
+  pendingFile = f
+  const t = new Thread(new UploadRunnable())
+  t.start()
 }

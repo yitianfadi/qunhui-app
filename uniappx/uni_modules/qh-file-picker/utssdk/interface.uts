@@ -90,6 +90,34 @@ export type ClearCacheOptions = {
   complete?: (res: any) => void
 }
 
+/** nativeUpload 成功回调参数 */
+export type NativeUploadResult = {
+  errMsg: string
+  /** HTTP 状态码 */
+  statusCode: number
+  /** 服务端响应正文（DSM 返回的 JSON 字符串） */
+  data: string
+}
+
+/** nativeUpload 参数 */
+export type NativeUploadOptions = {
+  /** 完整请求地址（含 _sid 查询参数），如 http://nas:5000/webapi/entry.cgi?_sid=xxx */
+  url: string
+  /** DSM 会话 id，作为 Cookie: id=xxx 发送 */
+  sid: string
+  /** NAS 目标目录，如 /photo */
+  destFolder: string
+  /** 待上传文件的本地绝对路径 */
+  filePath: string
+  /** 保存到 NAS 上的文件名 */
+  fileName: string
+  /** 进度回调，percent 为 0~100（含写完文件但未收到响应前的 99） */
+  onProgress?: (percent: number) => void
+  success?: (res: NativeUploadResult) => void
+  fail?: (res: UniError) => void
+  complete?: (res: any) => void
+}
+
 /** 错误码 */
 export type QhPickerErrorCode =
   9020001 | // 平台不支持
@@ -97,7 +125,9 @@ export type QhPickerErrorCode =
   9020003 | // 未取到 URI
   9020004 | // 读取文件失败
   9020005 | // 无法启动选择器
-  9020006 // 没有权限
+  9020006 | // 没有权限
+  9020007 | // 网络请求失败
+  9020008 // 文件不存在
 
 export interface QhPickerFail extends IUniError {
   errCode: QhPickerErrorCode
@@ -111,3 +141,14 @@ export type PickDirectory = (options: PickDirectoryOptions) => void
 export type ExportFile = (options: ExportOptions) => void
 /** 清空导出缓存目录 */
 export type ClearCache = (options: ClearCacheOptions) => void
+/**
+ * 原生流式 multipart 上传（参数段在前、文件段最后）。
+ *
+ * 为什么不用 uni.uploadFile：它固定把「文件段」放在 multipart 最前面，
+ * 而 DSM 的 SYNO.FileStation.Upload 要求参数段在前，文件段在前一律返回 101；
+ * 且它无法给出可控的进度/取消。这里用 HttpURLConnection 边读边发，
+ * 内存占用与文件大小无关，几百 MB 的视频也能传。
+ */
+export type NativeUpload = (options: NativeUploadOptions) => void
+/** 中断正在进行的 nativeUpload（只保留最近一次任务） */
+export type CancelNativeUpload = () => void

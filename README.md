@@ -142,8 +142,16 @@ dart run tools/dev_proxy.dart <NAS_IP> <NAS端口> 8091 uniappx/unpackage/dist/b
   2. **multipart 里必须带普通字段**（api/version/method/path/create_parents/overwrite），若只有 `file` 一个字段，服务端会挂住不响应（HTTP 无返回）；
   3. **保存名取 multipart 的 filename**，`formData.filename` 不生效 → 上传前必须把本地文件按目标文件名准备好；
 - **Upload 的 `path` 必须是已存在的共享文件夹**（如 `/home`、`/photo`）：不存在的共享返回 **408**，`create_parents` 只能创建共享内的子目录，不能创建共享本身。注意 `/home` 是"我的 home"别名，`/home/xxx` 会多一层目录，正确写法是 `/home`（本目录）或 `/homes/<用户>/...`；
+- **上传链路是三层，顺序不能动**（`syno.uts#uploadFile`）：
+  1. `qh-file-picker` 插件的 `nativeUpload`（`HttpURLConnection` 手工拼 multipart，**参数段在前、文件段最后**，定长流式发送）—— 唯一能稳定处理几百 MB 视频的路径，内存占用与文件大小无关；
+  2. `uni.uploadFile` —— 原生实现**固定把文件段放在 multipart 最前面**，DSM 会直接返回 `101`（参数顺序不符），因此它只作为「基座里没有插件方法」时的兜底；
+  3. `readFile` 自己拼报文 —— 整个文件读进内存，受单文件读取上限约束（`1300202`，`The maximum size of the file storage limit is exceeded`），只适合小文件；
+  
+  判断依据：`deviceNativeUpload` 在方法不存在时抛 `NATIVE_UNAVAILABLE:` 前缀的错误，上层据此决定是否继续回退；其它错误（101/网络）一律直接报给用户，不再往下退，避免把「顺序问题」伪装成「文件太大」；
+- **改过 `uni_modules/*/utssdk` 后必须重打自定义基座**：UTS 插件代码编译进基座 dex，只 push `dist/dev` 的 www 目录不会生效（基座里仍然是旧方法，`nativeUpload` 会走 `NATIVE_UNAVAILABLE` 回退）。正式包（云打包）不受影响，会自动带上；
+- **进度回调要节流**：64KB 一块，200MB 文件就是 3200 次跨线程回调，插件里只在百分比发生变化时才通知 JS；
 - **`uni.uploadFile` 的 `filePath` 只认 `file://` 形式**：`unifile://` 沙盒协议它不认，会被当成相对路径拼到 `apps/__UNI__xxx/www/` 下，报 `FileNotFoundException`（日志里能看到 `.../www/data/user/0/...` 这样的路径）。客户端按 `file://` → 裸绝对路径 → `unifile://` 的顺序逐个尝试，哪个成功用哪个；
-- **大文件（视频）必须走原生流式上传**：`uni.getFileSystemManager().readFile` 会把整个文件读进内存，且受单文件大小上限约束，几百 MB 的视频必然失败并报 `The maximum size of the file storage limit is exceeded`（错误码 1300202，界面上表现为「上传失败：读不到本地文件（The maximum size of ...）」）。因此上传默认走 `uni.uploadFile`（OkHttp 流式，内存占用与文件大小无关），只有它返回 101（参数顺序不符）时才回退到「自己拼 multipart + readFile」的老路径；
+- **相册权限判定不能用 `grantedList.length > 0`**：权限已授予时系统不再弹窗、Android 14「部分照片」授予的是 `READ_MEDIA_VISUAL_USER_SELECTED`、部分 ROM 回调里干脆没有这个字段 —— 三种情况都会拿到空数组，从而把「已授权」误判成「没有权限」。现在的口径是：先读 `uni.getAppAuthorizeSetting().albumAuthorized`，`authorized` 直接放行；否则请求一次，**只有 `deniedAlwaysList` 非空（勾了不再询问）才返回 false**，其余一律放行，真正的读取失败交给上传环节报准确错误；
 - **上传完成后的临时文件要用 `unifile://` 才能删掉**：`unlink` 同样不认裸绝对路径，`deviceRemoveFile` 已统一转换，否则 `cache/qh_pick` 会一直堆着上传过的副本；
 - HBuilderX 启动会调用 `wmic.exe`，若被安全软件/沙箱拦截会导致启动即崩；
 - **正式包必须自带 `AndroidManifest.xml` 才能用 HTTP**：Android 9+（targetSdk≥28）默认禁止明文 HTTP，**自定义调试基座由 HBuilderX 自动注入 `usesCleartextTraffic=true`，而云打包的正式包不会** —— 表现为 `request system error`（日志里 `NetworkSecurityConfig: No Network Security Config specified`），所有接口全挂。解决：在**项目根目录**（`uniappx/AndroidManifest.xml`，不是 nativeResources 下）放清单文件并在 `<application>` 上声明 `android:usesCleartextTraffic="true"`；

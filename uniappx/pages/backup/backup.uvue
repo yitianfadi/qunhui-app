@@ -172,7 +172,7 @@ import { upTaskList, startUpload, startUploadsBatch, cancelUpTask, removeUpTask,
 import { dlTaskList, DlTask } from '@/utils/download_manager.uts'
 import { backupFolder, backupPhotos } from '@/utils/backup_helper.uts'
 import { formatSize } from '@/utils/syno.uts'
-import { devicePickerSupported, devicePickDirectory, devicePickFiles, deviceClearCache, ensureMediaReadPermission, DeviceDir, DeviceFile } from '@/utils/device_picker.uts'
+import { devicePickerSupported, devicePickDirectory, devicePickFiles, deviceClearCache, ensureMediaReadPermission, openAppAuthorizeSetting, DeviceDir, DeviceFile } from '@/utils/device_picker.uts'
 
 const maxPick = 100000
 
@@ -300,12 +300,19 @@ function pickPhotos() {
   destFolder.value = dest
   savePaths()
   // 先申请相册读取权限：没有权限时即使能选中，读原图也会 EACCES（Permission denied）
+  // 只有「用户明确拒绝且不再询问」才会进入提示分支；已授权/状态读不到都直接放行
   ensureMediaReadPermission().then((ok: boolean) => {
     if (!ok) {
       uni.showModal({
-        title: '需要相册权限',
-        content: '请在「系统设置 → 应用 → 群晖助手 → 权限」中允许访问照片和视频，然后重试。',
-        showCancel: false,
+        title: '未获得相册权限',
+        content: '可以点「去设置」开启照片和视频权限；也可以改用下面的「选择任意文件上传」，那条路不需要相册权限。',
+        confirmText: '去设置',
+        cancelText: '取消',
+        success: (res) => {
+          if (res.confirm) {
+            openAppAuthorizeSetting()
+          }
+        },
       })
       return
     }
