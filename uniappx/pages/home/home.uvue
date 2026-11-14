@@ -4,7 +4,7 @@
     <view class="content">
       <files-view v-show="tab === 0" />
       <photos-view v-show="tab === 1" />
-      <downloads-view v-show="tab === 2" />
+      <transfer-view v-show="tab === 2" />
       <settings-view v-show="tab === 3" @logout="onLogout" />
     </view>
 
@@ -29,7 +29,7 @@ const tab = ref(0)
 const tabs = [
   { label: '文件', icon: '📁', iconActive: '📂' },
   { label: '照片', icon: '🖼️', iconActive: '🖼️' },
-  { label: '下载', icon: '☁️', iconActive: '⬇️' },
+  { label: '传输', icon: '☁️', iconActive: '🔁' },
   { label: '设置', icon: '⚙️', iconActive: '⚙️' },
 ]
 

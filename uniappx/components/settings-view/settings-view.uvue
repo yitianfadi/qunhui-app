@@ -39,7 +39,7 @@
     <view class="card">
       <view class="row" @click="openDownloads">
         <text class="row-icon">⬇️</text>
-        <text class="row-title">下载管理</text>
+        <text class="row-title">传输中心</text>
         <text v-if="activeCount > 0" class="badge">{{ activeCount }}</text>
         <text class="row-value">{{ dlHint }}</text>
         <text class="chevron">›</text>
