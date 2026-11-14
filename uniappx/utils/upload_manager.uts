@@ -1,7 +1,7 @@
 // 全局上传队列：手机 → NAS 备份（照片 / 文件）
 // 与下载队列一样串行执行，一次只传一个文件，避免多任务抢带宽
 import { ref } from 'vue'
-import { api, formatSize } from './syno.uts'
+import { api, formatSize, SynoError } from './syno.uts'
 import { deviceExportToCache, deviceRemoveFile, needsCacheExport } from './device_picker.uts'
 
 /** 状态：waiting 等待 / uploading 上传中 / done 已完成 / failed 失败 / canceled 已取消 */
@@ -460,7 +460,13 @@ async function runTask(t: UpTask) {
   } catch (e) {
     if (t.status !== 'canceled') {
       t.status = 'failed'
-      t.error = e instanceof Error ? e.message : String(e)
+      let msg = e instanceof Error ? e.message : String(e)
+      // 目录不存在/无权限：提示里带上具体目录，否则队列里全是同一条文案，看不出是配置错
+      const code = e instanceof SynoError ? (e as SynoError).code : 0
+      if (code === 408 || code === 401 || code === 105) {
+        msg = msg + '（目标目录 ' + t.destFolder + '）'
+      }
+      t.error = msg
       t.sizeText = '上传失败'
     }
   } finally {

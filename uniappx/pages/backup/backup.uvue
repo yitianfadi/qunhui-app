@@ -195,7 +195,7 @@ import { themeVars } from '@/utils/theme.uts'
 import { upTaskList, startUpload, startUploadsBatch, cancelUpTask, removeUpTask, clearFinishedUpTasks, retryUpTask, cancelAllUpTasks, retryAllFailedUpTasks, getConflictPolicy, setConflictPolicy, getDateSubdir, setDateSubdir, getWifiOnly, setWifiOnly, upNetworkBlocked, allowCellularUpload, UpTask, UploadRequest } from '@/utils/upload_manager.uts'
 import { dlTaskList, DlTask } from '@/utils/download_manager.uts'
 import { backupFolder, backupPhotos } from '@/utils/backup_helper.uts'
-import { formatSize } from '@/utils/syno.uts'
+import { api, formatSize, SynoError } from '@/utils/syno.uts'
 import { devicePickerSupported, devicePickDirectory, devicePickFiles, deviceClearCache, ensureMediaReadPermission, openAppAuthorizeSetting, DeviceDir, DeviceFile } from '@/utils/device_picker.uts'
 
 const maxPick = 100000
@@ -386,10 +386,11 @@ function fileNameFromPath(p: string, idx: number, fileType: string): string {
   return (isVideo ? 'VID_' : 'IMG_') + d.getTime() + '_' + idx + (isVideo ? '.mp4' : '.jpg')
 }
 
-function pickPhotos() {
-  const dest = destFolder.value.trim().length > 0 ? destFolder.value.trim() : '/home'
-  destFolder.value = dest
-  savePaths()
+async function pickPhotos() {
+  if (!(await ensureDestReady())) {
+    return
+  }
+  const dest = destFolder.value
   // 先申请相册读取权限：没有权限时即使能选中，读原图也会 EACCES（Permission denied）
   // 只有「用户明确拒绝且不再询问」才会进入提示分支；已授权/状态读不到都直接放行
   ensureMediaReadPermission().then((ok: boolean) => {
@@ -547,11 +548,61 @@ function joinFolder(base: string, sub: string): string {
   return b + '/' + sub
 }
 
+/** 目标目录归一化：去空白、补前导斜杠、折叠重复斜杠、去掉结尾斜杠（根目录除外） */
 function normalizeDest(): string {
-  const dest = destFolder.value.trim().length > 0 ? destFolder.value.trim() : '/home'
-  destFolder.value = dest
+  let d = destFolder.value.trim()
+  if (d.length === 0) {
+    d = '/home'
+  }
+  if (!d.startsWith('/')) {
+    d = '/' + d
+  }
+  while (d.indexOf('//') >= 0) {
+    d = d.replace('//', '/')
+  }
+  while (d.length > 1 && d.endsWith('/')) {
+    d = d.substring(0, d.length - 1)
+  }
+  destFolder.value = d
   savePaths()
-  return dest
+  return d
+}
+
+/**
+ * 上传前校验目标目录。
+ *
+ * 目录不存在时 DSM 只会在「每个文件传完」才回 408，队列里一条条失败，
+ * 很难看出是目录写错了（历史上就出现过手填的路径不存在、整批全失败）。
+ * 这里先探一次目录：不存在/无权限就直接弹框说明是哪个目录，并给出「重新选择」入口。
+ * 网络类错误不在这里拦，交给上传流程报，避免离线时连选择文件都做不了。
+ */
+async function ensureDestReady(): Promise<boolean> {
+  const dest = normalizeDest()
+  try {
+    await api.listFiles(dest)
+    return true
+  } catch (e) {
+    const code = e instanceof SynoError ? (e as SynoError).code : 0
+    if (code !== 408 && code !== 401 && code !== 105) {
+      return true
+    }
+    const noPerm = code === 105
+    return new Promise<boolean>((resolve) => {
+      uni.showModal({
+        title: noPerm ? '没有写入权限' : '目标目录不存在',
+        content: '「' + dest + '」' + (noPerm ? '当前账号没有写入权限。' : '在 NAS 上不存在。') +
+          '请重新选择一个已存在的共享文件夹（如 /home、/photo）。',
+        confirmText: '重新选择',
+        cancelText: '取消',
+        success: (res) => {
+          if (res.confirm) {
+            openPicker('dest')
+          }
+          resolve(false)
+        },
+      })
+    })
+  }
 }
 
 function unsupportedTip() {
@@ -562,12 +613,15 @@ function unsupportedTip() {
   })
 }
 
-function pickFolderUp() {
+async function pickFolderUp() {
   if (!devicePickerSupported()) {
     unsupportedTip()
     return
   }
-  const dest = normalizeDest()
+  if (!(await ensureDestReady())) {
+    return
+  }
+  const dest = destFolder.value
   // 清掉上一批残留的临时文件
   deviceClearCache()
   uni.showLoading({ title: '打开文件夹…', mask: true })
@@ -622,12 +676,15 @@ function enqueueFolder(dir: DeviceDir, dest: string) {
   uni.showToast({ title: '已加入 ' + n + ' 个文件，开始排队上传', icon: 'none' })
 }
 
-function pickAnyFiles() {
+async function pickAnyFiles() {
   if (!devicePickerSupported()) {
     unsupportedTip()
     return
   }
-  const dest = normalizeDest()
+  if (!(await ensureDestReady())) {
+    return
+  }
+  const dest = destFolder.value
   uni.showLoading({ title: '打开文件选择器…', mask: true })
   devicePickFiles(20, '*/*')
     .then((files: Array<DeviceFile>) => {
