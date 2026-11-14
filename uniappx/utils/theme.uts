@@ -1,0 +1,100 @@
+/**
+ * 主题（深色模式）
+ *
+ * 实现方式：颜色统一走 CSS 变量（uvue 支持 var()，已实测）。
+ * 每个页面/组件的根节点绑定 themeVars()，变量在其子树内生效，
+ * 样式表里把硬编码色换成 var(--xxx) 即可，模板不用逐个改颜色。
+ */
+
+import { ref } from 'vue'
+
+/** 'system' 跟随系统 | 'light' 浅色 | 'dark' 深色 */
+let mode = 'system'
+
+/** 当前是否深色（模板里用它做少数非颜色的分支） */
+export const themeDark = ref(false)
+
+let inited = false
+
+function readMode(): string {
+  try {
+    const v = uni.getStorageSync('app_theme_mode')
+    if (typeof v === 'string' && (v as string).length > 0) {
+      return v as string
+    }
+  } catch (e) {
+    // 忽略
+  }
+  return 'system'
+}
+
+/** 系统当前是否深色 */
+function systemDark(): boolean {
+  try {
+    const info: any = uni.getSystemInfoSync()
+    const t = info != null && typeof info.theme === 'string' ? (info.theme as string) : ''
+    return t === 'dark'
+  } catch (e) {
+    return false
+  }
+}
+
+function applyNavBar(dark: boolean) {
+  // 暂时禁用：真机上再决定是否启用（模拟器上疑似引起 uiMode 配置变化 → Activity 反复重建）
+  if (true) return
+  try {
+    uni.setNavigationBarColor({
+      frontColor: dark ? '#ffffff' : '#000000',
+      backgroundColor: dark ? '#14161a' : '#ffffff',
+    } as any)
+  } catch (e) {
+    // Web 端或部分环境不支持，忽略
+  }
+}
+
+function refresh() {
+  const dark = mode === 'dark' ? true : (mode === 'light' ? false : systemDark())
+  themeDark.value = dark
+  applyNavBar(dark)
+}
+
+/** 应用启动时调用一次（home 页面 onMounted 里） */
+export function initTheme() {
+  mode = readMode()
+  refresh()
+  if (inited) return
+  inited = true
+  // 说明：不注册 uni.onThemeChange —— 实测在部分基座里注册它会触发 uiMode 配置变化，
+  // 导致 Activity 反复重建（页面来回 reLaunch）。改为在启动/手动切换时读取系统主题。
+}
+
+export function getThemeMode(): string {
+  return mode
+}
+
+export function setThemeMode(v: string) {
+  mode = v
+  try {
+    uni.setStorageSync('app_theme_mode', v)
+  } catch (e) {
+    // 忽略
+  }
+  refresh()
+}
+
+/**
+ * 根节点要绑定的样式字符串。
+ * 浅色与深色两套变量，其余样式全部引用这些变量。
+ */
+export function themeVars(): string {
+  if (themeDark.value) {
+    return '--bg: #101216; --card: #1b1e24; --card2: #23272e; --line: #2c313a; --line2: #3a4049;' +
+      ' --soft: #1f2836; --t1: #e9ecef; --t2: #b6bcc6; --t3: #8b919b;' +
+      ' --brand: #5aa2f0; --brand-weak: #22314a; --danger: #ff7b6b; --on-brand: #ffffff; --mask: rgba(0,0,0,0.72);' +
+      ' --danger-weak: #3a2320; --warn: #e0b062; --warn-weak: #332a17; --ok: #5fcf90; --ok-weak: #1c3327'
+  }
+  return '--bg: #f7f8fa; --card: #ffffff; --card2: #f2f4f7; --line: #eef1f5; --line2: #e0e0e0;' +
+    ' --soft: #eaf2fb; --t1: #222222; --t2: #4b5563; --t3: #8a8f99;' +
+    ' --brand: #1e6bb8; --brand-weak: #eaf2fb; --danger: #d94838; --on-brand: #ffffff; --mask: rgba(0,0,0,0.85);' +
+    ' --danger-weak: #fdeceb; --warn: #8a5a00; --warn-weak: #fff7e6; --ok: #1a9c5b; --ok-weak: #e8f6ee'
+}

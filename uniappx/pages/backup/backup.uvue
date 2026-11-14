@@ -1,5 +1,5 @@
 <template>
-  <view class="backup-page">
+  <view class="backup-page" :style="themeVars()">
     <!-- 顶部切换 -->
     <view class="seg-bar">
       <text class="seg-item" :class="mode === 'up' ? 'seg-active' : ''" @click="switchMode('up')">上传备份</text>
@@ -191,6 +191,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { themeVars } from '@/utils/theme.uts'
 import { upTaskList, startUpload, startUploadsBatch, cancelUpTask, removeUpTask, clearFinishedUpTasks, retryUpTask, cancelAllUpTasks, retryAllFailedUpTasks, getConflictPolicy, setConflictPolicy, getDateSubdir, setDateSubdir, getWifiOnly, setWifiOnly, upNetworkBlocked, allowCellularUpload, UpTask, UploadRequest } from '@/utils/upload_manager.uts'
 import { dlTaskList, DlTask } from '@/utils/download_manager.uts'
 import { backupFolder, backupPhotos } from '@/utils/backup_helper.uts'
@@ -754,25 +755,25 @@ function openDownloadPage() {
 <style>
   .backup-page {
     flex: 1;
-    background-color: #f7f8fa;
+    background-color: var(--bg);
   }
   .seg-bar {
     flex-direction: row;
     justify-content: center;
     padding: 10px 0;
-    background-color: #ffffff;
-    border-bottom: 1px solid #eef1f5;
+    background-color: var(--card);
+    border-bottom: 1px solid var(--line);
   }
   .seg-item {
     font-size: 14px;
-    color: #666666;
+    color: var(--t2);
     padding: 6px 26px;
     margin: 0 8px;
     border-radius: 16px;
   }
   .seg-active {
-    color: #ffffff;
-    background-color: #1e6bb8;
+    color: var(--on-brand);
+    background-color: var(--brand);
   }
   .body {
     flex: 1;
@@ -784,7 +785,7 @@ function openDownloadPage() {
     flex-direction: column;
   }
   .card {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 12px;
     margin: 12px 12px 0 12px;
     padding: 14px;
@@ -793,14 +794,14 @@ function openDownloadPage() {
   .card-title {
     font-size: 14px;
     font-weight: bold;
-    color: #1a1d21;
+    color: var(--t1);
     margin-bottom: 10px;
   }
   .path-row {
     flex-direction: row;
     align-items: center;
     height: 40px;
-    background-color: #f5f7fa;
+    background-color: var(--bg);
     border-radius: 8px;
     padding: 0 12px;
   }
@@ -808,62 +809,62 @@ function openDownloadPage() {
     flex: 1;
     height: 40px;
     font-size: 14px;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .path-value {
     flex: 1;
     font-size: 14px;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .path-pick {
     font-size: 13px;
-    color: #1e6bb8;
+    color: var(--brand);
     padding: 4px 0 4px 10px;
   }
   .hint {
     font-size: 11px;
-    color: #9aa0a8;
+    color: var(--t3);
     margin-top: 10px;
   }
   .opt-row {
     flex-direction: row;
     align-items: center;
     height: 40px;
-    background-color: #f5f7fa;
+    background-color: var(--bg);
     border-radius: 8px;
     padding: 0 12px;
     margin-top: 8px;
   }
   .opt-label {
     font-size: 14px;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .opt-value {
     flex: 1;
     text-align: right;
     font-size: 13px;
-    color: #6b7280;
+    color: var(--t3);
   }
   .net-tip {
     flex-direction: row;
     align-items: center;
     margin: 10px 12px 0 12px;
     padding: 10px 12px;
-    background-color: #fff7e6;
+    background-color: var(--warn-weak);
     border-radius: 10px;
   }
   .net-tip-text {
     flex: 1;
     font-size: 12px;
-    color: #8a5a00;
+    color: var(--warn);
   }
   .net-tip-act {
     font-size: 12px;
-    color: #1e6bb8;
+    color: var(--brand);
     padding-left: 10px;
   }
   .action-card {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 12px;
     margin: 10px 12px 0 12px;
     padding: 14px;
@@ -880,29 +881,29 @@ function openDownloadPage() {
   }
   .action-title {
     font-size: 15px;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .action-sub {
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
     margin-top: 3px;
   }
   .chevron {
     font-size: 18px;
-    color: #c8ccd4;
+    color: var(--t3);
   }
   .note-card {
     margin: 10px 16px 0 16px;
   }
   .note-text {
     font-size: 11px;
-    color: #9aa0a8;
+    color: var(--t3);
     line-height: 17px;
   }
   .run-btn {
     height: 42px;
     border-radius: 8px;
-    background-color: #1e6bb8;
+    background-color: var(--brand);
     margin-top: 12px;
     align-items: center;
     justify-content: center;
@@ -912,11 +913,11 @@ function openDownloadPage() {
   }
   .run-btn-text {
     font-size: 14px;
-    color: #ffffff;
+    color: var(--t1);
   }
   .busy-text {
     font-size: 12px;
-    color: #1e6bb8;
+    color: var(--brand);
     margin-top: 8px;
   }
   .queue-head {
@@ -927,11 +928,11 @@ function openDownloadPage() {
   .queue-title {
     flex: 1;
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
   }
   .queue-clear {
     font-size: 12px;
-    color: #1e6bb8;
+    color: var(--brand);
     padding: 2px 0 2px 10px;
   }
   .queue-clear-gap {
@@ -942,11 +943,11 @@ function openDownloadPage() {
   }
   .queue-note-text {
     font-size: 11px;
-    color: #9aa0a8;
+    color: var(--t3);
     line-height: 16px;
   }
   .task {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 10px;
     margin: 8px 12px 0 12px;
     padding: 12px 14px 13px 14px;
@@ -966,11 +967,11 @@ function openDownloadPage() {
   }
   .task-name {
     font-size: 14px;
-    color: #222222;
+    color: var(--t1);
   }
   .task-meta {
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
     margin-top: 3px;
   }
   .task-act {
@@ -978,22 +979,22 @@ function openDownloadPage() {
     padding: 6px 8px;
   }
   .task-act-primary {
-    color: #1e6bb8;
+    color: var(--brand);
   }
   .task-act-danger {
-    color: #d94838;
+    color: var(--danger);
   }
   .bar {
     height: 6px;
     border-radius: 3px;
-    background-color: #eef1f5;
+    background-color: var(--line);
     margin-top: 10px;
     overflow: hidden;
   }
   .bar-in {
     height: 6px;
     border-radius: 3px;
-    background-color: #1e6bb8;
+    background-color: var(--brand);
   }
   .task-foot {
     flex-direction: row;
@@ -1003,16 +1004,16 @@ function openDownloadPage() {
   .task-size {
     flex: 1;
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
   }
   .task-err {
     flex: 1;
     font-size: 12px;
-    color: #d94838;
+    color: var(--danger);
   }
   .task-del {
     font-size: 12px;
-    color: #b0b5bd;
+    color: var(--t3);
     padding: 4px 0 4px 12px;
   }
   .empty-box {
@@ -1025,12 +1026,12 @@ function openDownloadPage() {
   }
   .empty-title {
     font-size: 15px;
-    color: #444444;
+    color: var(--t2);
     margin-bottom: 8px;
   }
   .empty-hint {
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
     text-align: center;
     width: 100%;
     line-height: 20px;

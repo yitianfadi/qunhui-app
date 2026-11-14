@@ -1,5 +1,5 @@
 <template>
-  <view class="photos-page">
+  <view class="photos-page" :style="themeVars()">
     <view class="seg-bar">
       <text class="seg-item" :class="!shared ? 'seg-active' : ''" @click="switchSpace(false)">个人空间</text>
       <text class="seg-item" :class="shared ? 'seg-active' : ''" @click="switchSpace(true)">共享空间</text>
@@ -73,6 +73,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { api, PhotoItem } from '@/utils/syno.uts'
+import { themeVars } from '@/utils/theme.uts'
 import { startDownload } from '@/utils/download_manager.uts'
 
 const shared = ref(false)
@@ -341,18 +342,18 @@ function saveCurrent() {
     flex-direction: row;
     justify-content: center;
     padding: 8px 0;
-    background-color: #ffffff;
+    background-color: var(--card);
   }
   .seg-item {
     font-size: 14px;
-    color: #666666;
+    color: var(--t2);
     padding: 6px 24px;
     margin: 0 8px;
     border-radius: 16px;
   }
   .seg-active {
-    color: #ffffff;
-    background-color: #1e6bb8;
+    color: var(--on-brand);
+    background-color: var(--brand);
   }
   .photo-scroll {
     flex: 1;
@@ -362,10 +363,10 @@ function saveCurrent() {
   }
   .section-title {
     font-size: 13px;
-    color: #4b5563;
+    color: var(--t2);
     font-weight: bold;
     padding: 12px 12px 6px 12px;
-    background-color: #f7f8fa;
+    background-color: var(--bg);
   }
   .grid {
     flex-direction: row;
@@ -380,13 +381,13 @@ function saveCurrent() {
   .thumb {
     width: 124px;
     height: 124px;
-    background-color: #e8eef5;
+    background-color: var(--soft);
   }
   .video-badge {
     position: absolute;
     right: 6px;
     bottom: 6px;
-    color: #ffffff;
+    color: var(--t1);
     font-size: 14px;
   }
   .more-tip {
@@ -401,7 +402,7 @@ function saveCurrent() {
   .retry-btn {
     align-self: center;
     text-align: center;
-    color: #1e6bb8;
+    color: var(--brand);
     padding: 8px;
   }
   .empty-box {

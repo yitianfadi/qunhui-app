@@ -12,14 +12,14 @@
   /* 全局基础样式：页面背景由 pages.json globalStyle.backgroundColor 提供
      （uni-app x app 端 uvue 仅支持类名选择器，不能使用 page 标签选择器） */
   .card {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 8px;
     margin: 8px 12px;
     padding: 12px;
   }
   .btn-primary {
-    background-color: #1e6bb8;
-    color: #ffffff;
+    background-color: var(--brand);
+    color: var(--on-brand);
     border-radius: 8px;
     height: 44px;
     /* app 端 uvue 中 text-align 不会从 view 继承给子 text，
@@ -30,11 +30,11 @@
     font-size: 16px;
   }
   .text-secondary {
-    color: #888888;
+    color: var(--t3);
     font-size: 12px;
   }
   .text-error {
-    color: #d94838;
+    color: var(--danger);
     font-size: 13px;
   }
 </style>

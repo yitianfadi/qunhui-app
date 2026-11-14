@@ -1,5 +1,5 @@
 <template>
-  <view v-if="active > 0" class="dl-banner" @click="openDlPage">
+  <view v-if="active > 0" class="dl-banner" :style="themeVars()" @click="openDlPage">
     <text class="banner-icon">⬇️</text>
     <view class="banner-main">
       <view class="banner-line">
@@ -17,6 +17,7 @@
 <script setup>
 import { computed } from 'vue'
 import { dlTaskList, dlActiveCount } from '@/utils/download_manager.uts'
+import { themeVars } from '@/utils/theme.uts'
 
 const active = computed(() => dlActiveCount())
 
@@ -52,10 +53,10 @@ function openDlPage() {
     bottom: 62px;
     flex-direction: row;
     align-items: center;
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 10px;
     padding: 8px 12px;
-    border: 1px solid #e4ebf3;
+    border: 1px solid var(--line);
   }
   .banner-icon {
     font-size: 16px;
@@ -72,28 +73,28 @@ function openDlPage() {
   .banner-name {
     flex: 1;
     font-size: 12px;
-    color: #333333;
+    color: var(--t2);
   }
   .banner-count {
     font-size: 11px;
-    color: #1e6bb8;
+    color: var(--brand);
     margin-left: 6px;
   }
   .banner-bar {
     height: 4px;
     border-radius: 2px;
-    background-color: #eef1f5;
+    background-color: var(--line);
     margin-top: 5px;
     overflow: hidden;
   }
   .banner-bar-in {
     height: 4px;
     border-radius: 2px;
-    background-color: #1e6bb8;
+    background-color: var(--brand);
   }
   .banner-pct {
     font-size: 12px;
-    color: #1e6bb8;
+    color: var(--brand);
     margin-left: 10px;
   }
 </style>

@@ -1,5 +1,5 @@
 <template>
-  <view class="files-page">
+  <view class="files-page" :style="themeVars()">
     <!-- 选择模式工具条 -->
     <view v-if="selectMode" class="sel-bar">
       <text class="sel-cancel" @click="exitSelect">取消</text>
@@ -105,6 +105,7 @@
 <script setup>
 import { ref } from 'vue'
 import { api, formatSize, FileItem } from '@/utils/syno.uts'
+import { themeVars } from '@/utils/theme.uts'
 import { startDownload } from '@/utils/download_manager.uts'
 import { backupFolder } from '@/utils/backup_helper.uts'
 
@@ -786,54 +787,54 @@ function createFolder() {
     padding: 4px 10px;
   }
   .up-btn-on {
-    color: #1e6bb8;
+    color: var(--brand);
   }
   .up-btn-off {
-    color: #cccccc;
+    color: var(--t3);
   }
   .path-text {
     flex: 1;
     font-size: 13px;
-    color: #555555;
+    color: var(--t2);
   }
   .refresh-btn {
     font-size: 16px;
-    color: #1e6bb8;
+    color: var(--brand);
     padding: 4px 10px;
   }
   .recycle-clear {
     font-size: 12px;
-    color: #d94838;
+    color: var(--danger);
     padding: 4px 4px 4px 8px;
   }
   .bar-btn {
     font-size: 15px;
-    color: #1e6bb8;
+    color: var(--brand);
     padding: 4px 8px;
   }
   .sel-bar {
     flex-direction: row;
     align-items: center;
-    background-color: #1e6bb8;
+    background-color: var(--brand);
     padding: 10px 12px;
   }
   .sel-cancel {
     font-size: 14px;
-    color: #ffffff;
+    color: var(--t1);
     padding-right: 12px;
   }
   .sel-count {
     flex: 1;
     font-size: 14px;
-    color: #ffffff;
+    color: var(--t1);
   }
   .sel-all {
     font-size: 14px;
-    color: #ffffff;
+    color: var(--t1);
     padding-left: 12px;
   }
   .file-row-on {
-    background-color: #eaf2fb;
+    background-color: var(--soft);
   }
   .check {
     width: 22px;
@@ -844,29 +845,29 @@ function createFolder() {
     line-height: 22px;
   }
   .check-on {
-    background-color: #1e6bb8;
-    color: #ffffff;
+    background-color: var(--brand);
+    color: var(--on-brand);
   }
   .check-off {
-    border: 1px solid #c4c9d1;
+    border: 1px solid var(--line2);
     color: #c4c9d1;
   }
   .batch-bar {
     flex-direction: row;
     align-items: center;
-    background-color: #ffffff;
-    border-top: 1px solid #eef0f3;
+    background-color: var(--card);
+    border-top: 1px solid var(--line);
     padding: 4px 6px;
   }
   .batch-btn {
     flex: 1;
     text-align: center;
     font-size: 12px;
-    color: #1e6bb8;
+    color: var(--brand);
     padding: 10px 2px;
   }
   .batch-danger {
-    color: #d94838;
+    color: var(--danger);
   }
   .state-bar {
     flex-direction: row;
@@ -876,11 +877,11 @@ function createFolder() {
   .state-text {
     flex: 1;
     font-size: 12px;
-    color: #6b7280;
+    color: var(--t3);
   }
   .state-x {
     font-size: 12px;
-    color: #d94838;
+    color: var(--danger);
     padding-left: 8px;
   }
   .list {
@@ -889,7 +890,7 @@ function createFolder() {
   .file-row {
     flex-direction: row;
     align-items: center;
-    background-color: #ffffff;
+    background-color: var(--card);
     padding: 12px;
     margin: 4px 12px;
     border-radius: 8px;
@@ -904,11 +905,11 @@ function createFolder() {
   }
   .file-name {
     font-size: 15px;
-    color: #222222;
+    color: var(--t1);
   }
   .chevron {
     font-size: 18px;
-    color: #cccccc;
+    color: var(--t3);
   }
   .error-center {
     width: 100%;
@@ -936,7 +937,7 @@ function createFolder() {
     align-items: center;
   }
   .sheet {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 12px 12px 0 0;
     padding: 16px;
   }
@@ -944,11 +945,11 @@ function createFolder() {
     font-size: 16px;
     font-weight: bold;
     margin-bottom: 12px;
-    color: #222222;
+    color: var(--t1);
   }
   .sheet-item {
     padding: 12px 4px;
-    border-top: 1px solid #f0f0f0;
+    border-top: 1px solid var(--line);
   }
   .fab {
     position: fixed;
@@ -957,12 +958,12 @@ function createFolder() {
     width: 52px;
     height: 52px;
     border-radius: 26px;
-    background-color: #1e6bb8;
+    background-color: var(--brand);
     align-items: center;
     justify-content: center;
   }
   .fab-text {
     font-size: 14px;
-    color: #ffffff;
+    color: var(--t1);
   }
 </style>

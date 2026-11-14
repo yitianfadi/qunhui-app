@@ -1,5 +1,5 @@
 <template>
-  <view class="tp-page">
+  <view class="tp-page" :style="themeVars()">
     <!-- 分段：上传 / 下载 / 下载站 -->
     <view class="seg">
       <text class="seg-item" :class="seg === 0 ? 'seg-on' : 'seg-off'" @click="seg = 0">上传 {{ upBadge }}</text>
@@ -95,6 +95,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { themeVars } from '@/utils/theme.uts'
 import {
   upTaskList,
   upActiveCount,
@@ -265,14 +266,14 @@ function clearDl() {
 <style>
   .tp-page {
     flex: 1;
-    background-color: #f7f8fa;
+    background-color: var(--bg);
   }
   .seg {
     flex-direction: row;
     align-items: center;
-    background-color: #ffffff;
+    background-color: var(--card);
     padding: 8px 12px;
-    border-bottom: 1px solid #eef1f5;
+    border-bottom: 1px solid var(--line);
   }
   .seg-item {
     flex: 1;
@@ -282,12 +283,12 @@ function clearDl() {
     border-radius: 8px;
   }
   .seg-on {
-    background-color: #eaf2fb;
-    color: #1e6bb8;
+    background-color: var(--soft);
+    color: var(--brand);
     font-weight: bold;
   }
   .seg-off {
-    color: #6b7280;
+    color: var(--t3);
   }
   .list {
     flex: 1;
@@ -307,23 +308,23 @@ function clearDl() {
   .sum-title {
     font-size: 15px;
     font-weight: bold;
-    color: #222222;
+    color: var(--t1);
   }
   .sum-sub {
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
     margin-top: 3px;
   }
   .sum-link {
     font-size: 12px;
-    color: #1e6bb8;
+    color: var(--brand);
     padding: 6px 2px;
   }
   .sum-link-gap {
     margin-left: 8px;
   }
   .task {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 10px;
     margin: 6px 12px;
     padding: 12px 14px 13px 14px;
@@ -343,11 +344,11 @@ function clearDl() {
   }
   .task-name {
     font-size: 14px;
-    color: #222222;
+    color: var(--t1);
   }
   .task-meta {
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
     margin-top: 3px;
   }
   .task-act {
@@ -355,21 +356,21 @@ function clearDl() {
     padding: 6px 8px;
   }
   .task-act-primary {
-    color: #1e6bb8;
+    color: var(--brand);
   }
   .task-act-danger {
-    color: #d94838;
+    color: var(--danger);
   }
   .bar {
     height: 4px;
-    background-color: #eef1f5;
+    background-color: var(--line);
     border-radius: 2px;
     margin-top: 10px;
     overflow: hidden;
   }
   .bar-in {
     height: 4px;
-    background-color: #1e6bb8;
+    background-color: var(--brand);
   }
   .task-foot {
     flex-direction: row;
@@ -379,16 +380,16 @@ function clearDl() {
   .task-size {
     flex: 1;
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
   }
   .task-err {
     flex: 1;
     font-size: 12px;
-    color: #d94838;
+    color: var(--danger);
   }
   .task-del {
     font-size: 12px;
-    color: #9aa0a8;
+    color: var(--t3);
     padding-left: 10px;
   }
   .empty-box {
@@ -401,11 +402,11 @@ function clearDl() {
   }
   .empty-title {
     font-size: 15px;
-    color: #4b5563;
+    color: var(--t2);
   }
   .empty-hint {
     font-size: 12px;
-    color: #9aa0a8;
+    color: var(--t3);
     margin-top: 8px;
     text-align: center;
   }

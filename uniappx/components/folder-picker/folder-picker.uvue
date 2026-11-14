@@ -1,5 +1,5 @@
 <template>
-  <view class="fp-mask" @click="close">
+  <view class="fp-mask" :style="themeVars()" @click="close">
     <view class="fp-panel" @click.stop="">
       <view class="fp-head">
         <text class="fp-title">{{ title }}</text>
@@ -38,6 +38,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { themeVars } from '@/utils/theme.uts'
 import { api, FileItem } from '@/utils/syno.uts'
 
 // title 供模板直接使用；显隐由父级 v-if 控制
@@ -135,7 +136,7 @@ function close() {
   }
   .fp-panel {
     height: 520px;
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 14px 14px 0 0;
     flex-direction: column;
   }
@@ -148,18 +149,18 @@ function close() {
     flex: 1;
     font-size: 16px;
     font-weight: bold;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .fp-close {
     font-size: 16px;
-    color: #9aa0a8;
+    color: var(--t3);
     padding: 4px 8px;
   }
   .fp-pathbar {
     flex-direction: row;
     align-items: center;
     padding: 6px 14px;
-    background-color: #f5f7fa;
+    background-color: var(--bg);
     margin: 0 12px;
     border-radius: 8px;
   }
@@ -168,15 +169,15 @@ function close() {
     padding: 4px 10px 4px 2px;
   }
   .fp-up-on {
-    color: #1e6bb8;
+    color: var(--brand);
   }
   .fp-up-off {
-    color: #cccccc;
+    color: var(--t3);
   }
   .fp-path {
     flex: 1;
     font-size: 13px;
-    color: #555555;
+    color: var(--t2);
   }
   .fp-list {
     flex: 1;
@@ -195,11 +196,11 @@ function close() {
   .fp-name {
     flex: 1;
     font-size: 15px;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .fp-chevron {
     font-size: 17px;
-    color: #c8ccd4;
+    color: var(--t3);
   }
   .fp-empty {
     padding: 40px;
@@ -207,11 +208,11 @@ function close() {
   }
   .fp-empty-text {
     font-size: 13px;
-    color: #9aa0a8;
+    color: var(--t3);
   }
   .fp-error {
     font-size: 12px;
-    color: #d94838;
+    color: var(--danger);
     padding: 16px;
     text-align: center;
     width: 100%;
@@ -233,18 +234,18 @@ function close() {
   }
   .fp-cancel-text {
     font-size: 15px;
-    color: #6b7280;
+    color: var(--t3);
   }
   .fp-ok {
     flex: 2;
     height: 44px;
     border-radius: 8px;
-    background-color: #1e6bb8;
+    background-color: var(--brand);
     align-items: center;
     justify-content: center;
   }
   .fp-ok-text {
     font-size: 15px;
-    color: #ffffff;
+    color: var(--t1);
   }
 </style>

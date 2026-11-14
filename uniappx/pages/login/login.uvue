@@ -1,5 +1,5 @@
 <template>
-  <scroll-view class="page-bg" direction="vertical">
+  <scroll-view class="page-bg" direction="vertical" :style="themeVars()">
     <view class="login-wrap">
       <image class="logo" src="/static/logo_192.png" mode="aspectFit" />
       <text class="title">连接你的群晖 NAS</text>
@@ -75,6 +75,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { api, SynoError, NasAccount } from '@/utils/syno.uts'
+import { themeVars } from '@/utils/theme.uts'
 
 const host = ref('')
 const port = ref('5000')
@@ -233,7 +234,7 @@ async function onLogin() {
 <style>
   .page-bg {
     flex: 1;
-    background-color: #f7f8fa;
+    background-color: var(--bg);
   }
   .login-wrap {
     padding: 40px 24px 24px 24px;
@@ -253,21 +254,21 @@ async function onLogin() {
     width: 100%;
     text-align: center;
     margin: 12px 0 20px 0;
-    color: #222222;
+    color: var(--t1);
   }
   .web-tip {
-    background-color: #e8f1fb;
+    background-color: var(--brand-weak);
     border-radius: 8px;
     padding: 10px 12px;
     margin-bottom: 14px;
   }
   .web-tip-text {
-    color: #1e6bb8;
+    color: var(--brand);
     font-size: 12px;
     line-height: 20px;
   }
   .error-box {
-    background-color: #fdeceb;
+    background-color: var(--danger-weak);
     border-radius: 8px;
     padding: 8px 12px;
     margin-bottom: 14px;
@@ -278,7 +279,7 @@ async function onLogin() {
   }
   .seg {
     flex-direction: row;
-    background-color: #eef1f5;
+    background-color: var(--line);
     border-radius: 8px;
     padding: 3px;
   }
@@ -286,31 +287,31 @@ async function onLogin() {
     flex: 1;
     text-align: center;
     font-size: 13px;
-    color: #666666;
+    color: var(--t2);
     padding: 7px 0;
     border-radius: 6px;
   }
   .seg-active {
-    background-color: #ffffff;
-    color: #1e6bb8;
+    background-color: var(--card);
+    color: var(--brand);
     font-weight: bold;
   }
   .label {
     font-size: 13px;
-    color: #666666;
+    color: var(--t2);
     margin-bottom: 6px;
   }
   .hint-text {
     font-size: 11px;
-    color: #9aa0a8;
+    color: var(--t3);
     margin-top: 6px;
   }
   .input {
     height: 42px;
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 8px;
     padding: 0 12px;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--line2);
     font-size: 15px;
   }
   .login-btn {
@@ -322,7 +323,7 @@ async function onLogin() {
   .section-title {
     font-size: 14px;
     font-weight: bold;
-    color: #444444;
+    color: var(--t2);
     margin-bottom: 8px;
   }
   .saved-item {
@@ -331,6 +332,6 @@ async function onLogin() {
   }
   .saved-name {
     font-size: 15px;
-    color: #222222;
+    color: var(--t1);
   }
 </style>

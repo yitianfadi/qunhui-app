@@ -1,5 +1,5 @@
 <template>
-  <scroll-view class="set-page" direction="vertical">
+  <scroll-view class="set-page" direction="vertical" :style="themeVars()">
     <!-- 账号信息卡 -->
     <view class="account-card">
       <view class="acc-head">
@@ -30,6 +30,17 @@
         <text class="row-icon">👤</text>
         <text class="row-title">切换账号</text>
         <text class="row-value">{{ accountHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+    </view>
+
+    <!-- 外观 -->
+    <text class="group-title">外观</text>
+    <view class="card">
+      <view class="row" @click="pickTheme">
+        <text class="row-icon">🌓</text>
+        <text class="row-title">深色模式</text>
+        <text class="row-value">{{ themeHint }}</text>
         <text class="chevron">›</text>
       </view>
     </view>
@@ -96,6 +107,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { themeVars, getThemeMode, setThemeMode, themeDark } from '@/utils/theme.uts'
 import { api, NasAccount, SynoError } from '@/utils/syno.uts'
 import { dlActiveCount, dlDoneCount } from '@/utils/download_manager.uts'
 import { upActiveCount, upDoneCount } from '@/utils/upload_manager.uts'
@@ -320,6 +332,31 @@ async function doSwitch(acc: Record<string, any>) {
   }
 }
 
+// ---------------- 外观（深色模式） ----------------
+
+const themeMode = ref(getThemeMode())
+
+const themeHint = computed(() => {
+  const m = themeMode.value
+  if (m === 'light') return '浅色'
+  if (m === 'dark') return '深色'
+  return themeDark.value ? '跟随系统（当前深色）' : '跟随系统（当前浅色）'
+})
+
+function pickTheme() {
+  const items = ['跟随系统', '浅色', '深色']
+  uni.showActionSheet({
+    itemList: items,
+    success: (res) => {
+      const modes = ['system', 'light', 'dark']
+      const m = modes[res.tapIndex]
+      setThemeMode(m)
+      themeMode.value = m
+      uni.showToast({ title: '已切换到' + items[res.tapIndex], icon: 'none' })
+    },
+  })
+}
+
 function confirmLogout() {
   uni.showModal({
     title: '退出登录',
@@ -440,7 +477,7 @@ function copyText(text: string, tip: string) {
 
   /* ---------- 账号卡 ---------- */
   .account-card {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 12px;
     margin: 12px 12px 0 12px;
     padding: 14px;
@@ -463,25 +500,25 @@ function copyText(text: string, tip: string) {
   .acc-name {
     font-size: 16px;
     font-weight: bold;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .acc-addr {
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
     margin-top: 4px;
   }
   .acc-badge {
-    background-color: #e8f6ee;
+    background-color: var(--ok-weak);
     border-radius: 10px;
     padding: 3px 9px;
   }
   .acc-badge-text {
     font-size: 11px;
-    color: #1a9c5b;
+    color: var(--ok);
   }
   .acc-divider {
     height: 1px;
-    background-color: #f0f2f5;
+    background-color: var(--card2);
     margin: 12px 0 4px 0;
   }
   .acc-meta {
@@ -492,22 +529,22 @@ function copyText(text: string, tip: string) {
   .acc-meta-label {
     width: 76px;
     font-size: 13px;
-    color: #8a8f99;
+    color: var(--t3);
   }
   .acc-meta-value {
     flex: 1;
     font-size: 13px;
-    color: #333333;
+    color: var(--t2);
   }
 
   /* ---------- 分组 ---------- */
   .group-title {
     font-size: 12px;
-    color: #8a8f99;
+    color: var(--t3);
     margin: 18px 20px 2px 20px;
   }
   .card {
-    background-color: #ffffff;
+    background-color: var(--card);
     border-radius: 12px;
     margin: 8px 12px 0 12px;
     padding: 0 14px;
@@ -529,22 +566,22 @@ function copyText(text: string, tip: string) {
   .row-title {
     flex: 1;
     font-size: 15px;
-    color: #1a1d21;
+    color: var(--t1);
   }
   .row-value {
     font-size: 13px;
-    color: #8a8f99;
+    color: var(--t3);
     margin-left: 6px;
   }
   .chevron {
     font-size: 18px;
-    color: #c8ccd4;
+    color: var(--t3);
     margin-left: 6px;
   }
   .badge {
     font-size: 11px;
-    color: #ffffff;
-    background-color: #d94838;
+    color: var(--on-brand);
+    background-color: var(--danger);
     border-radius: 9px;
     padding: 1px 6px;
     margin-left: 6px;
@@ -559,12 +596,12 @@ function copyText(text: string, tip: string) {
   }
   .logout-text {
     font-size: 15px;
-    color: #d94838;
+    color: var(--danger);
   }
 
   .footer {
     font-size: 11px;
-    color: #b0b5bd;
+    color: var(--t3);
     text-align: center;
     width: 100%;
     margin-top: 22px;
