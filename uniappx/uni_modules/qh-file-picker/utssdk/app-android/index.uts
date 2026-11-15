@@ -43,8 +43,8 @@ import HostnameVerifier from 'javax.net.ssl.HostnameVerifier'
 import X509Certificate from 'java.security.cert.X509Certificate'
 // Kotlin 原生数组类型（UTS Array 编译为 UTSArray，与系统 API 要求的 kotlin.Array 不兼容）
 import KotlinArray from 'kotlin.Array'
-// 生物识别回调：纯 Kotlin 混编实现，见同目录 BioNative.kt
-import { BioNativeCallback } from './BioNative.kt'
+// 生物识别回调 BioNativeCallback 在同包混编文件 BioNative.kt 中
+// （package uts.sdk.modules.qhFilePicker 与插件默认包一致，按官方混编规范无需 import）
 
 import {
   PickFiles,
