@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  qh-file-picker 原生权限声明
+  打自定义基座 / 云打包时由 manifest merger 自动合并进主工程，
+  项目 manifest.json 无需重复填写。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Android 13+ 本地通知（备份完成提醒） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 生物识别应用锁（androidx.biometric） -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- 老 API 指纹（Android 9 以下兼容兜底） -->
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+</manifest>

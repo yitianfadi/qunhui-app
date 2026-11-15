@@ -1,10 +1,22 @@
 <script>
+  import { appInBackground } from '@/utils/app_state.uts'
+  import { relockIfEnabled } from '@/utils/app_lock.uts'
+  import { restoreTrustCerts } from '@/utils/native_extra.uts'
+
   export default {
     onLaunch: function () {
       console.log('App Launch')
+      // 恢复「信任自签证书」设置（只影响原生上传通道）
+      restoreTrustCerts()
     },
-    onShow: function () {},
-    onHide: function () {},
+    onShow: function () {
+      appInBackground.value = false
+    },
+    onHide: function () {
+      appInBackground.value = true
+      // 开了应用锁的情况下，退后台即重锁（回前台 onShow 时需重新验证）
+      relockIfEnabled()
+    },
   }
 </script>
 

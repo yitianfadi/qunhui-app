@@ -118,6 +118,50 @@ export type NativeUploadOptions = {
   complete?: (res: any) => void
 }
 
+/** notifyUploadDone 参数 */
+export type NotifyUploadOptions = {
+  /** 通知标题，如「备份完成」 */
+  title: string
+  /** 通知内容，如「成功 12 个，失败 1 个」 */
+  content: string
+}
+
+/**
+ * 发一条本地通知（备份完成提醒）。
+ * 通知权限未授予时静默跳过；仅 Android。
+ */
+export type NotifyUploadDone = (options: NotifyUploadOptions) => void
+
+/** biometricAuth 参数 */
+export type BiometricAuthOptions = {
+  /** 系统验证框标题，如「解锁群晖助手」 */
+  title: string
+  /** 副标题（可选） */
+  subtitle?: string
+  /** 取消按钮文字，默认「取消」 */
+  negativeText?: string
+  /** 验证通过 */
+  success?: () => void
+  /** 验证失败 / 取消 / 设备不可用（用 errCode 区分） */
+  fail?: (res: UniError) => void
+}
+
+/**
+ * 弹出系统生物识别验证框（指纹 / 面容）。
+ * 内部已把回调切回主线程派发，避免后台线程回调丢失。
+ */
+export type BiometricAuth = (options: BiometricAuthOptions) => void
+
+/** 设备是否支持生物识别且已录入特征（指纹 / 面容） */
+export type BiometricAvailable = () => boolean
+
+/**
+ * 是否信任自签 HTTPS 证书。
+ * 只影响本插件的 HttpURLConnection（大文件上传通道），
+ * uni.request 的证书校验不受它控制。
+ */
+export type SetTrustAllCerts = (enable: boolean) => void
+
 /** 错误码 */
 export type QhPickerErrorCode =
   9020001 | // 平台不支持
@@ -127,7 +171,10 @@ export type QhPickerErrorCode =
   9020005 | // 无法启动选择器
   9020006 | // 没有权限
   9020007 | // 网络请求失败
-  9020008 // 文件不存在
+  9020008 | // 文件不存在
+  9020009 | // 生物识别不可用（设备不支持 / 未录入）
+  9020010 | // 生物识别验证失败
+  9020011 // 用户取消验证
 
 export interface QhPickerFail extends IUniError {
   errCode: QhPickerErrorCode

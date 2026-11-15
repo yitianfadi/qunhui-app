@@ -24,6 +24,23 @@ import BufferedReader from 'java.io.BufferedReader'
 import InputStreamReader from 'java.io.InputStreamReader'
 import Thread from 'java.lang.Thread'
 import Runnable from 'java.lang.Runnable'
+import CharSequence from 'java.lang.CharSequence'
+import Build from 'android.os.Build'
+import Context from 'android.content.Context'
+import NotificationManager from 'android.app.NotificationManager'
+import NotificationChannel from 'android.app.NotificationChannel'
+import PendingIntent from 'android.app.PendingIntent'
+import NotificationCompat from 'androidx.core.app.NotificationCompat'
+import BiometricManager from 'androidx.biometric.BiometricManager'
+import BiometricPrompt from 'androidx.biometric.BiometricPrompt'
+import FragmentActivity from 'androidx.fragment.app.FragmentActivity'
+import Executors from 'java.util.concurrent.Executors'
+import HttpsURLConnection from 'javax.net.ssl.HttpsURLConnection'
+import SSLContext from 'javax.net.ssl.SSLContext'
+import SSLSession from 'javax.net.ssl.SSLSession'
+import X509TrustManager from 'javax.net.ssl.X509TrustManager'
+import HostnameVerifier from 'javax.net.ssl.HostnameVerifier'
+import X509Certificate from 'java.security.cert.X509Certificate'
 
 import {
   PickFiles,
@@ -43,7 +60,13 @@ import {
   CancelNativeUpload,
   NativeUploadProgress,
   NativeUploadOptions,
-  NativeUploadResult
+  NativeUploadResult,
+  NotifyUploadDone,
+  NotifyUploadOptions,
+  BiometricAuth,
+  BiometricAuthOptions,
+  BiometricAvailable,
+  SetTrustAllCerts
 } from '../interface.uts'
 import { QhPickerFailImpl } from '../unierror'
 
@@ -718,4 +741,192 @@ export const nativeUpload: NativeUpload = function (options: NativeUploadOptions
   pendingFile = f
   const t = new Thread(new UploadRunnable())
   t.start()
+}
+
+// ---------------------------------------------------------------------------
+// 系统通知（备份完成提醒）
+// ---------------------------------------------------------------------------
+
+const CHANNEL_UPLOAD = 'qh_upload'
+let notifySeq = 1000
+
+/**
+ * 发一条本地通知。通知权限未授予时静默跳过（不打扰用户）。
+ * 通知点击后打开应用（取 getLaunchIntentForPackage）。
+ */
+export const notifyUploadDone: NotifyUploadDone = function (options: NotifyUploadOptions) {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) {
+    return
+  }
+  try {
+    const nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    if (nm == null || !nm.areNotificationsEnabled()) {
+      return
+    }
+    if (Build.VERSION.SDK_INT >= 26) {
+      const ch = new NotificationChannel(CHANNEL_UPLOAD, '备份提醒', NotificationManager.IMPORTANCE_DEFAULT)
+      nm.createNotificationChannel(ch)
+    }
+    const launch = ctx.getPackageManager().getLaunchIntentForPackage(ctx.getPackageName())
+    let pi: PendingIntent | null = null
+    if (launch != null) {
+      let req: Int = 0
+      pi = PendingIntent.getActivity(ctx, req, launch, PendingIntent.FLAG_IMMUTABLE)
+    }
+    const builder = new NotificationCompat.Builder(ctx, CHANNEL_UPLOAD)
+    builder.setSmallIcon(ctx.getApplicationInfo().icon)
+    builder.setContentTitle(options.title)
+    builder.setContentText(options.content)
+    // 长文本：失败原因可能较长，折叠前也能看清
+    builder.setStyle(new NotificationCompat.BigTextStyle().bigText(options.content))
+    builder.setAutoCancel(true)
+    if (pi != null) {
+      builder.setContentIntent(pi)
+    }
+    notifySeq = notifySeq + 1
+    nm.notify(notifySeq, builder.build())
+  } catch (e) {
+    // 通知失败不影响业务
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 生物识别应用锁（androidx.biometric）
+// ---------------------------------------------------------------------------
+
+function biometricAvailableInternal(): boolean {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) {
+    return false
+  }
+  try {
+    const bm = BiometricManager.from(ctx)
+    return bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) == BiometricManager.BIOMETRIC_SUCCESS
+  } catch (e) {
+    return false
+  }
+}
+
+/** 设备是否支持生物识别且已录入指纹/面容 */
+export const isBiometricAvailable: BiometricAvailable = function (): boolean {
+  return biometricAvailableInternal()
+}
+
+/**
+ * 验证结果桥接：系统回调可能来自我们传入的 executor 线程，
+ * 直接调 JS 回调会丢（与上传进度同款问题），必须切回主线程再派发。
+ */
+class BioCallback extends BiometricPrompt.AuthenticationCallback {
+  options: BiometricAuthOptions | null = null
+
+  override onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+    this.dispatch(0, '')
+  }
+
+  override onAuthenticationError(errorCode: Int, errString: CharSequence) {
+    // 5 = ERROR_USER_CANCELED（点取消/点负面按钮）
+    // 13 = ERROR_NEGATIVE_BUTTON
+    let code = 2
+    if (errorCode.toString() == '5' || errorCode.toString() == '13') {
+      code = 1
+    }
+    this.dispatch(code, errString.toString())
+  }
+
+  override onAuthenticationFailed() {
+    // 单次指纹不匹配，系统会继续弹框让用户重试，不回调 JS
+  }
+
+  /** result: 0 成功 / 1 用户取消 / 2 失败 */
+  dispatch(result: number, msg: string) {
+    const o = this.options
+    if (o == null) {
+      return
+    }
+    this.options = null
+    UTSAndroid.getDispatcher('main').async((_) => {
+      if (result == 0) {
+        o.success?.()
+      } else {
+        const err = new QhPickerFailImpl(result == 1 ? 9020011 : 9020010)
+        if (msg.length > 0) {
+          err.errMsg = msg
+        }
+        o.fail?.(err)
+      }
+    }, null)
+  }
+}
+
+/** 弹出系统生物识别验证框（指纹/面容） */
+export const biometricAuth: BiometricAuth = function (options: BiometricAuthOptions) {
+  const act = UTSAndroid.getUniActivity()
+  if (act == null) {
+    options.fail?.(new QhPickerFailImpl(9020010))
+    return
+  }
+  if (!biometricAvailableInternal()) {
+    options.fail?.(new QhPickerFailImpl(9020009))
+    return
+  }
+  const cb = new BioCallback()
+  cb.options = options
+  const fa = act as FragmentActivity
+  const prompt = new BiometricPrompt(fa, Executors.newSingleThreadExecutor(), cb)
+  const builder = new BiometricPrompt.PromptInfo.Builder()
+  builder.setTitle(options.title)
+  if (options.subtitle != null && options.subtitle!.length > 0) {
+    builder.setSubtitle(options.subtitle!)
+  }
+  if (options.negativeText != null && options.negativeText!.length > 0) {
+    builder.setNegativeButtonText(options.negativeText!)
+  } else {
+    builder.setNegativeButtonText('取消')
+  }
+  builder.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK)
+  prompt.authenticate(builder.build())
+}
+
+// ---------------------------------------------------------------------------
+// 自签 HTTPS 证书（仅影响本插件的 HttpURLConnection 上传通道）
+// ---------------------------------------------------------------------------
+
+class TrustAllManager extends X509TrustManager {
+  override checkClientTrusted(chain: Array<X509Certificate>, authType: string) {
+    // 信任所有客户端证书
+  }
+  override checkServerTrusted(chain: Array<X509Certificate>, authType: string) {
+    // 信任所有服务端证书（用户显式开启才生效）
+  }
+  override getAcceptedIssuers(): Array<X509Certificate> {
+    return new Array<X509Certificate>()
+  }
+}
+
+class TrustAllHostnames extends HostnameVerifier {
+  override verify(hostname: string, session: SSLSession): boolean {
+    return true
+  }
+}
+
+/**
+ * 开启后跳过 HTTPS 证书校验（自签名 NAS 场景）。
+ * 只对 HttpsURLConnection 全局默认工厂生效 → 本插件的上传通道；
+ * uni.request 的网络栈不归它管，设置页已注明这个局限。
+ */
+export const setTrustAllCerts: SetTrustAllCerts = function (enable: boolean) {
+  try {
+    if (!enable) {
+      return
+    }
+    const managers = new Array<X509TrustManager>()
+    managers.push(new TrustAllManager())
+    const sc = SSLContext.getInstance('TLS')
+    sc.init(null, managers, null)
+    HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory())
+    HttpsURLConnection.setDefaultHostnameVerifier(new TrustAllHostnames())
+  } catch (e) {
+    // 初始化失败保持系统默认校验
+  }
 }

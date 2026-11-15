@@ -1,0 +1,82 @@
+// 应用锁（生物识别）
+// 开关存 storage('app_lock_enabled')；会话内解锁标记仅存内存，
+// App 退到后台即重锁（App.uvue onHide 里调用 relockIfEnabled）。
+import { bioAvailable, bioAuth } from './native_extra.uts'
+
+let sessionUnlocked = false
+
+export function isLockEnabled(): boolean {
+  try {
+    const v = uni.getStorageSync('app_lock_enabled')
+    return typeof v === 'string' && (v as string) === '1'
+  } catch (e) {
+    return false
+  }
+}
+
+export function setLockEnabled(v: boolean) {
+  try {
+    uni.setStorageSync('app_lock_enabled', v ? '1' : '0')
+  } catch (e) {
+    // 忽略
+  }
+}
+
+export function isSessionUnlocked(): boolean {
+  return sessionUnlocked
+}
+
+export function markSessionUnlocked() {
+  sessionUnlocked = true
+}
+
+/** App 退后台时重锁 */
+export function relockIfEnabled() {
+  if (isLockEnabled()) {
+    sessionUnlocked = false
+  }
+}
+
+/**
+ * 页面 onShow 时调用：已解锁/未开启返回 true 直接放行；
+ * 需要验证时弹系统生物识别框并返回 false。
+ * 验证失败/取消会弹「重试」确认框，用户不点确认也能继续用（软锁），
+ * 主要用于防他人顺手翻看，不是强加密。
+ */
+export function ensureUnlocked(): boolean {
+  if (!isLockEnabled() || isSessionUnlocked()) {
+    return true
+  }
+  doAuthWithRetry()
+  return false
+}
+
+function doAuthWithRetry() {
+  bioAuth('解锁群晖助手', '使用生物特征验证身份', (code: number, msg: string) => {
+    if (code === 0) {
+      markSessionUnlocked()
+      return
+    }
+    if (code === 3) {
+      // 设备不支持（比如录入了开关后生物特征被清空）：放行并提示
+      uni.showModal({
+        title: '无法验证身份',
+        content: '设备不支持生物识别或未录入指纹/面容，可继续使用，建议到设置里关闭应用锁。',
+        showCancel: false,
+      })
+      markSessionUnlocked()
+      return
+    }
+    uni.showModal({
+      title: code === 1 ? '验证已取消' : '验证失败',
+      content: msg.length > 0 ? msg : '如需继续使用请重新验证',
+      confirmText: '重试',
+      cancelText: '稍后',
+      success: (r) => {
+        if (r.confirm) {
+          doAuthWithRetry()
+        }
+      },
+    })
+  })
+}

@@ -1,0 +1,5 @@
+// App 全局状态（跨页面共享的最小集合）
+import { ref } from 'vue'
+
+/** App 是否处于后台（由 App.uvue 的 onShow / onHide 维护） */
+export const appInBackground = ref(false)

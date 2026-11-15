@@ -1,0 +1,128 @@
+/**
+ * 原生能力包装（P5）：系统通知 / 生物识别 / 自签证书
+ * 仅 Android 有原生实现；其他平台提供空实现，页面层无需关心平台差异。
+ * 对应 UTS 插件：uni_modules/qh-file-picker
+ */
+
+// #ifdef APP-ANDROID
+import {
+  notifyUploadDone,
+  isBiometricAvailable,
+  biometricAuth,
+  setTrustAllCerts
+} from '@/uni_modules/qh-file-picker'
+// #endif
+
+/** 发本地通知（备份完成提醒）；非 Android 平台为空操作 */
+export function notifyDone(title: string, content: string) {
+  // #ifdef APP-ANDROID
+  try {
+    notifyUploadDone({ title: title, content: content } as any)
+  } catch (e) {
+    // 通知失败不影响业务
+  }
+  // #endif
+}
+
+/** 申请通知权限（Android 13+ 才会弹系统框，每次会话最多问一次） */
+let notifyPermAsked = false
+export function requestNotifyPermissionSafe() {
+  // #ifdef APP-ANDROID
+  if (notifyPermAsked) {
+    return
+  }
+  notifyPermAsked = true
+  try {
+    uni.requestSystemPermission({
+      permissions: ['android.permission.POST_NOTIFICATIONS'],
+      success: (_: any) => { },
+      fail: (_: any) => { },
+    } as any)
+  } catch (e) {
+    // 低版本无此 API，忽略
+  }
+  // #endif
+}
+
+/** 设备是否支持生物识别且已录入特征 */
+export function bioAvailable(): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return isBiometricAvailable()
+  } catch (e) {
+    return false
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return false
+  // #endif
+}
+
+/**
+ * 生物识别验证。
+ * 回调 code：0 成功 / 1 用户取消 / 2 验证失败 / 3 设备不支持
+ */
+export function bioAuth(title: string, subtitle: string, callback: (code: number, msg: string) => void) {
+  // #ifdef APP-ANDROID
+  if (!bioAvailable()) {
+    callback(3, '设备不支持或未录入指纹/面容')
+    return
+  }
+  try {
+    biometricAuth({
+      title: title,
+      subtitle: subtitle,
+      negativeText: '取消',
+      success: () => {
+        callback(0, '')
+      },
+      fail: (err: any) => {
+        const code = err?.errCode ?? 0
+        const msg: string = err?.errMsg ?? ''
+        if (code == 9020011) {
+          callback(1, '已取消验证')
+        } else if (code == 9020009) {
+          callback(3, msg)
+        } else {
+          callback(2, msg)
+        }
+      },
+    } as any)
+  } catch (e) {
+    callback(2, e instanceof Error ? e.message : String(e))
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  callback(3, '当前平台不支持生物识别')
+  // #endif
+}
+
+/** 读取「信任自签证书」开关（storage） */
+export function trustCertsEnabled(): boolean {
+  try {
+    const v = uni.getStorageSync('trust_self_signed')
+    return typeof v === 'string' && (v as string) === '1'
+  } catch (e) {
+    return false
+  }
+}
+
+/** 恢复「信任自签证书」设置（App 启动时调用一次） */
+export function restoreTrustCerts() {
+  // #ifdef APP-ANDROID
+  if (trustCertsEnabled()) {
+    setTrustAllCerts(true)
+  }
+  // #endif
+}
+
+/** 应用「信任自签证书」开关（关闭时无需回滚，App 重启即恢复系统默认） */
+export function applyTrustCerts(enable: boolean) {
+  // #ifdef APP-ANDROID
+  try {
+    setTrustAllCerts(enable)
+  } catch (e) {
+    // 忽略
+  }
+  // #endif
+}

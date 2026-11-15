@@ -45,6 +45,29 @@
       </view>
     </view>
 
+    <!-- 安全 -->
+    <text class="group-title">安全</text>
+    <view class="card">
+      <view class="row" @click="toggleAppLock">
+        <text class="row-icon">🔒</text>
+        <text class="row-title">生物识别应用锁</text>
+        <text class="row-value">{{ lockHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+      <view class="row row-line" @click="toggleTrustCert">
+        <text class="row-icon">🛡️</text>
+        <text class="row-title">信任自签证书</text>
+        <text class="row-value">{{ trustHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+      <view class="row row-line" @click="requestNotifyPermissionSafe()">
+        <text class="row-icon">🔔</text>
+        <text class="row-title">备份完成通知</text>
+        <text class="row-value">{{ notifyHint }}</text>
+        <text class="chevron">›</text>
+      </view>
+    </view>
+
     <!-- 传输 -->
     <text class="group-title">传输</text>
     <view class="card">
@@ -118,6 +141,8 @@ import {
   downloadApk,
   AppRelease,
 } from '@/utils/update_checker.uts'
+import { isLockEnabled, setLockEnabled, markSessionUnlocked } from '@/utils/app_lock.uts'
+import { bioAvailable, bioAuth, trustCertsEnabled, applyTrustCerts, requestNotifyPermissionSafe } from '@/utils/native_extra.uts'
 
 const account = api.account
 
@@ -356,6 +381,92 @@ function pickTheme() {
     },
   })
 }
+
+// ---------------- 安全（应用锁 / 自签证书 / 通知） ----------------
+
+const lockOn = ref(isLockEnabled())
+
+const lockHint = computed(() => (lockOn.value ? '已开启' : '关闭'))
+
+function toggleAppLock() {
+  if (lockOn.value) {
+    setLockEnabled(false)
+    lockOn.value = false
+    uni.showToast({ title: '应用锁已关闭', icon: 'none' })
+    return
+  }
+  if (!bioAvailable()) {
+    uni.showToast({ title: '设备不支持生物识别或未录入指纹/面容', icon: 'none' })
+    return
+  }
+  // 开启前先验证一次，确保特征可用
+  bioAuth('开启应用锁', '验证通过后开启', (code: number, msg: string) => {
+    if (code === 0) {
+      setLockEnabled(true)
+      lockOn.value = true
+      markSessionUnlocked()
+      uni.showToast({ title: '应用锁已开启', icon: 'none' })
+      return
+    }
+    if (code === 1) {
+      uni.showToast({ title: '已取消，应用锁未开启', icon: 'none' })
+      return
+    }
+    uni.showToast({ title: '验证失败，应用锁未开启', icon: 'none' })
+  })
+}
+
+const trustOn = ref(trustCertsEnabled())
+
+const trustHint = computed(() => (trustOn.value ? '已信任' : '不信任'))
+
+function toggleTrustCert() {
+  const next = !trustOn.value
+  if (next) {
+    uni.showModal({
+      title: '信任自签证书',
+      content: '开启后将跳过 HTTPS 证书校验（仅对大文件上传通道生效，普通 API 请求不受影响）。仅建议在家庭局域网内使用，公共网络下有被窃听风险。',
+      confirmText: '仍要开启',
+      success: (r) => {
+        if (r.confirm) {
+          applyTrustCerts(true)
+          try {
+            uni.setStorageSync('trust_self_signed', '1')
+          } catch (e) { }
+          trustOn.value = true
+          uni.showToast({ title: '已信任自签证书', icon: 'none' })
+        }
+      },
+    })
+    return
+  }
+  applyTrustCerts(false)
+  try {
+    uni.setStorageSync('trust_self_signed', '0')
+  } catch (e) { }
+  trustOn.value = false
+  uni.showToast({ title: '已恢复证书校验', icon: 'none' })
+}
+
+const notifyOn = ref(false)
+
+const notifyHint = computed(() => (notifyOn.value ? '已授权' : '点此授权'))
+
+function refreshNotifyState() {
+  // #ifdef APP-ANDROID
+  try {
+    const setting: any = uni.getAppAuthorizeSetting()
+    notifyOn.value = String(setting?.notificationAuthorized ?? '') === 'authorized'
+  } catch (e) {
+    notifyOn.value = false
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  notifyOn.value = true
+  // #endif
+}
+
+refreshNotifyState()
 
 function confirmLogout() {
   uni.showModal({

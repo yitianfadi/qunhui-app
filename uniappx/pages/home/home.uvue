@@ -23,8 +23,11 @@
 
 <script setup>
 import { ref } from 'vue'
+import { onShow } from '@dcloudio/uni-app'
 import { api } from '@/utils/syno.uts'
 import { themeVars, initTheme } from '@/utils/theme.uts'
+import { ensureUnlocked } from '@/utils/app_lock.uts'
+import { restoreTrustCerts } from '@/utils/native_extra.uts'
 
 const tab = ref(0)
 const tabs = [
@@ -35,11 +38,17 @@ const tabs = [
 ]
 
 initTheme()
+restoreTrustCerts()
 
 // 未登录则回登录页
 if (!api.loggedIn) {
   uni.reLaunch({ url: '/pages/login/login' })
 }
+
+// 应用锁：进入首页（含从后台返回）时需要生物识别验证
+onShow(() => {
+  ensureUnlocked()
+})
 
 function onLogout() {
   api.clear()
