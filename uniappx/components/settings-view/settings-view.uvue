@@ -60,7 +60,7 @@
         <text class="row-value">{{ trustHint }}</text>
         <text class="chevron">›</text>
       </view>
-      <view class="row row-line" @click="requestNotifyPermissionSafe()">
+      <view class="row row-line" @click="tapNotifyRow()">
         <text class="row-icon">🔔</text>
         <text class="row-title">备份完成通知</text>
         <text class="row-value">{{ notifyHint }}</text>
@@ -142,7 +142,7 @@ import {
   AppRelease,
 } from '@/utils/update_checker.uts'
 import { isLockEnabled, setLockEnabled, markSessionUnlocked } from '@/utils/app_lock.uts'
-import { bioAvailable, bioAuth, trustCertsEnabled, applyTrustCerts, requestNotifyPermissionSafe } from '@/utils/native_extra.uts'
+import { bioAvailable, bioAuth, trustCertsEnabled, applyTrustCerts, requestNotifyPermissionSafe, notifyDone } from '@/utils/native_extra.uts'
 
 const account = api.account
 
@@ -451,6 +451,12 @@ function toggleTrustCert() {
 const notifyOn = ref(false)
 
 const notifyHint = computed(() => (notifyOn.value ? '已授权' : '点此授权'))
+
+function tapNotifyRow() {
+  // 直接发一条测试通知：用于验证原生通知链路（点击后系统通知栏应立即出现）
+  notifyDone('群晖助手', '测试通知：看到这条说明通知链路正常')
+  requestNotifyPermissionSafe()
+}
 
 function refreshNotifyState() {
   // #ifdef APP-ANDROID
