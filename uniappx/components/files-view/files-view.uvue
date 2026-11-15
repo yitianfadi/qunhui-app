@@ -55,22 +55,22 @@
       <view class="sheet" @click.stop="">
         <text class="sheet-title">{{ actionItem?.name }}</text>
         <view class="sheet-item" @click="downloadFile">
-          <text>⬇️ 下载到本机</text>
+          <text class="sheet-text">⬇️ 下载到本机</text>
         </view>
         <view class="sheet-item" @click="makeShareLink">
-          <text>🔗 创建共享链接</text>
+          <text class="sheet-text">🔗 创建共享链接</text>
         </view>
         <view class="sheet-item" @click="renameItem(actionItem)">
-          <text>✏️ 重命名</text>
+          <text class="sheet-text">✏️ 重命名</text>
         </view>
         <view class="sheet-item" @click="startMove(actionItem, 'move')">
-          <text>📦 移动到…</text>
+          <text class="sheet-text">📦 移动到…</text>
         </view>
         <view class="sheet-item" @click="startMove(actionItem, 'copy')">
-          <text>📑 复制到…</text>
+          <text class="sheet-text">📑 复制到…</text>
         </view>
         <view class="sheet-item" @click="deleteFile">
-          <text style="color:#d94838;">🗑️ 删除</text>
+          <text class="sheet-text sheet-danger">🗑️ 删除</text>
         </view>
         <view class="sheet-item" @click="actionItem = null">
           <text class="text-secondary">取消</text>
@@ -1070,6 +1070,13 @@ function createFolder() {
   .sheet-item {
     padding: 12px 4px;
     border-top: 1px solid var(--line);
+  }
+  .sheet-text {
+    font-size: 15px;
+    color: var(--t1);
+  }
+  .sheet-danger {
+    color: var(--danger);
   }
   .fab {
     position: fixed;
