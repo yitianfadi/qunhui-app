@@ -17,8 +17,10 @@ import {
 export function notifyDone(title: string, content: string) {
   // #ifdef APP-ANDROID
   try {
-    notifyUploadDone({ title: title, content: content } as any)
+    console.log('notifyDone -> ' + title + ' | ' + content)
+    notifyUploadDone({ title: title, content: content })
   } catch (e) {
+    console.log('notifyDone failed: ' + e.toString())
     // 通知失败不影响业务
   }
   // #endif

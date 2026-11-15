@@ -10,9 +10,11 @@
       restoreTrustCerts()
     },
     onShow: function () {
+      console.log('App onShow -> foreground')
       appInBackground.value = false
     },
     onHide: function () {
+      console.log('App onHide -> background')
       appInBackground.value = true
       // 开了应用锁的情况下，退后台即重锁（回前台 onShow 时需重新验证）
       relockIfEnabled()

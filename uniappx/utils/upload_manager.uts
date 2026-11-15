@@ -3,7 +3,7 @@
 import { ref } from 'vue'
 import { api, formatSize, SynoError } from './syno.uts'
 import { deviceExportToCache, deviceRemoveFile, needsCacheExport } from './device_picker.uts'
-import { appInBackground } from './app_state.uts'
+import { appInBackground } from '@/utils/app_state.uts'
 import { notifyDone, requestNotifyPermissionSafe } from './native_extra.uts'
 
 /** 状态：waiting 等待 / uploading 上传中 / done 已完成 / failed 失败 / canceled 已取消 */
@@ -490,9 +490,11 @@ async function runTask(t: UpTask) {
  */
 function maybeNotifyQueueDrained() {
   if (currentId.length > 0 || pendingIds.length > 0) {
+    console.log('notify skip: busy, currentId=' + currentId + ', pending=' + pendingIds.length.toString())
     return
   }
   if (!appInBackground.value) {
+    console.log('notify skip: foreground')
     return
   }
   let ok = 0
