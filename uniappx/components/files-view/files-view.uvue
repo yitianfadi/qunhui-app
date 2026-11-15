@@ -14,6 +14,7 @@
       <text v-if="items.length > 0" class="bar-btn" @click="enterSelect">☑</text>
       <text v-if="inRecycle === false" class="bar-btn" @click="openSearch">🔍</text>
       <text v-if="inRecycle === false" class="bar-btn" @click="pickSort">⇅</text>
+      <text v-if="inRecycle === false && stack.length > 0" class="bar-btn" @click="downloadWholeFolder(currentFolderPath())">⬇️</text>
       <text v-if="inRecycle" class="recycle-clear" @click="emptyRecycle">清空</text>
       <text class="refresh-btn" @click="load">⟳</text>
     </view>
@@ -106,8 +107,8 @@
 import { ref } from 'vue'
 import { api, formatSize, FileItem } from '@/utils/syno.uts'
 import { themeVars } from '@/utils/theme.uts'
-import { startDownload } from '@/utils/download_manager.uts'
-import { backupFolder } from '@/utils/backup_helper.uts'
+import { startDownload, startDownloadBatch, DlBatchItem } from '@/utils/download_manager.uts'
+import { scanFolder, enqueueFolderDownloads, FolderScan } from '@/utils/backup_helper.uts'
 
 const stack = ref<Array<string>>([])
 const items = ref<Array<FileItem>>([])
@@ -280,13 +281,13 @@ function onLongPress(item: FileItem) {
   }
   if (stack.value.length === 0) {
     uni.showActionSheet({
-      itemList: ['进入文件夹', '打开回收站', '重命名', '移动到…', '复制到…', '备份到本机', '删除'],
+      itemList: ['进入文件夹', '打开回收站', '重命名', '移动到…', '复制到…', '下载全部文件', '删除'],
       success: (res) => handleDirAction(item, res.tapIndex),
     })
     return
   }
   uni.showActionSheet({
-    itemList: ['进入文件夹', '重命名', '移动到…', '复制到…', '备份到本机', '删除'],
+    itemList: ['进入文件夹', '重命名', '移动到…', '复制到…', '下载全部文件', '删除'],
     success: (res) => handleDirAction(item, res.tapIndex),
   })
 }
@@ -470,27 +471,152 @@ function batchDelete() {
   })
 }
 
+/** 当前目录的绝对路径（工具栏「下载全部」用） */
+function currentFolderPath(): string {
+  return currentPath.value
+}
+
+/**
+ * 下载整个文件夹（含子目录）到本机：
+ * 先扫描统计 → 数量多时弹确认 → 确认后分批入队（UI 不卡顿）
+ */
+async function downloadWholeFolder(folderPath: string) {
+  uni.showLoading({ title: '扫描目录中', mask: true } as any)
+  let scan: FolderScan
+  try {
+    scan = await scanFolder(folderPath, 1000, (text: string) => {
+      uni.showLoading({ title: text, mask: true } as any)
+    })
+  } catch (e) {
+    uni.hideLoading()
+    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+    return
+  }
+  uni.hideLoading()
+  if (scan.files === 0) {
+    uni.showToast({ title: '文件夹里没有可下载的文件', icon: 'none' })
+    return
+  }
+  if (scan.truncated) {
+    uni.showModal({
+      title: '文件数量过多',
+      content: '该文件夹（含子目录）超过 1000 个文件，为避免占满队列，请改用 DSM 端打包下载或分批处理。',
+      showCancel: false,
+    } as any)
+    return
+  }
+
+  const begin = () => {
+    const groupId = 'fd' + Date.now().toString()
+    const groupName = folderPath.split('/').pop() ?? folderPath
+    uni.showLoading({ title: '正在加入 0 / ' + scan.files.toString(), mask: false } as any)
+    enqueueFolderDownloads(folderPath, groupId, groupName, 1000, (text: string) => {
+      uni.showLoading({ title: text, mask: false } as any)
+    }).then((r) => {
+      uni.hideLoading()
+      uni.showToast({ title: '已加入 ' + r.files.toString() + ' 个文件，可到传输中心查看', icon: 'none' })
+    }).catch((e) => {
+      uni.hideLoading()
+      uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+    })
+  }
+
+  if (scan.files <= 50) {
+    begin()
+    return
+  }
+  uni.showModal({
+    title: '确认批量下载',
+    content: '共 ' + scan.files.toString() + ' 个文件 · 总大小约 ' + formatSize(scan.totalSize) + '，将分批加入下载队列（3 个并发）。确定开始？',
+    success: (res) => {
+      if (res.confirm) begin()
+    },
+  } as any)
+}
+
 /** 批量备份到本机 = 逐个加入下载队列（下载管理页可看进度） */
-function batchDownload() {
+async function batchDownload() {
   const paths = selectedPaths.value.slice()
   if (paths.length === 0) return
-  let n = 0
+  // 收集：文件直入批量列表；文件夹递归扫描统计后并入（一次确认）
+  const direct: Array<DlBatchItem> = []
+  const folders: Array<FileItem> = []
+  let dirFiles = 0
+  let dirSize = 0
   for (let i = 0; i < items.value.length; i++) {
     const it = items.value[i]
     if (paths.indexOf(it.path) < 0) continue
     if (it.isDir) {
-      // 目录不支持单文件下载，跳过并提示
-      continue
+      folders.push(it)
+    } else {
+      const item: DlBatchItem = { url: api.downloadFileUrl(it.path), name: it.name, nasPath: it.path }
+      direct.push(item)
     }
-    startDownload(api.downloadFileUrl(it.path), it.name, it.path)
-    n = n + 1
   }
-  if (n === 0) {
-    uni.showToast({ title: '选中的是文件夹，请用长按「备份到本机」', icon: 'none' })
+  for (let i = 0; i < folders.length; i++) {
+    uni.showLoading({ title: '扫描目录中 ' + (i + 1).toString() + '/' + folders.length.toString(), mask: true } as any)
+    try {
+      const s = await scanFolder(folders[i].path, 1000, (text: string) => {
+        uni.showLoading({ title: text, mask: true } as any)
+      })
+      dirFiles = dirFiles + s.files
+      dirSize = dirSize + s.totalSize
+    } catch (e) {
+      uni.hideLoading()
+      uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+      return
+    }
+  }
+  uni.hideLoading()
+  const totalCount = direct.length + dirFiles
+  if (totalCount === 0) {
+    uni.showToast({ title: '没有可下载的文件', icon: 'none' })
     return
   }
-  uni.showToast({ title: '已加入下载列表 ' + n + ' 项', icon: 'none' })
-  exitSelect()
+  if (dirFiles > 1000) {
+    uni.showModal({
+      title: '文件数量过多',
+      content: '所选文件夹超过 1000 个文件，请改用 DSM 端打包下载或分批处理。',
+      showCancel: false,
+    } as any)
+    return
+  }
+
+  const groupId = 'fd' + Date.now().toString()
+  const groupName = folders.length === 1 ? folders[0].name : '多选 ' + folders.length.toString() + ' 个文件夹'
+  const begin = () => {
+    uni.showLoading({ title: '正在加入 0 / ' + totalCount.toString(), mask: false } as any)
+    const seqPromise = (async () => {
+      let totalAdded = startDownloadBatch(direct, groupId, groupName)
+      for (let i = 0; i < folders.length; i++) {
+        const r = await enqueueFolderDownloads(folders[i].path, groupId, groupName, 1000 - totalAdded, (text: string) => {
+          uni.showLoading({ title: text, mask: false } as any)
+        })
+        totalAdded = totalAdded + r.files
+      }
+      return totalAdded
+    })()
+    seqPromise.then((added) => {
+      uni.hideLoading()
+      uni.showToast({ title: '已加入 ' + added.toString() + ' 个文件', icon: 'none' })
+    }).catch((e) => {
+      uni.hideLoading()
+      uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
+    })
+    exitSelect()
+  }
+
+  if (totalCount <= 50) {
+    begin()
+    return
+  }
+  uni.showModal({
+    title: '确认批量下载',
+    content: '共 ' + totalCount.toString() + ' 个文件 · 总大小约 ' + formatSize(dirSize) + '，将分批加入下载队列。确定开始？',
+    success: (res) => {
+      if (res.confirm) begin()
+    },
+  } as any)
 }
 
 function batchMove(mode: string) {
@@ -650,25 +776,9 @@ function clearSearch() {
   items.value = rawItems.value
 }
 
+/** 长按文件夹「下载全部文件」：走两阶段流程（扫描 → 确认 → 分批入队） */
 async function backupFolderToDevice(item: FileItem) {
-  uni.showLoading({ title: '扫描目录中', mask: true } as any)
-  try {
-    const r = await backupFolder(item.path, 200, (text: string) => {
-      uni.showLoading({ title: text, mask: true } as any)
-    })
-    uni.hideLoading()
-    uni.showToast({ title: '已加入 ' + r.files + ' 个文件', icon: 'none' })
-    if (r.truncated) {
-      uni.showModal({
-        title: '已达单次上限',
-        content: '单次最多备份 200 个文件，剩余内容请在「备份与恢复」页分批处理。',
-        showCancel: false,
-      })
-    }
-  } catch (e) {
-    uni.hideLoading()
-    uni.showToast({ title: e instanceof Error ? e.message : String(e), icon: 'none' })
-  }
+  await downloadWholeFolder(item.path)
 }
 
 /** 按绝对路径重建目录栈 */

@@ -1,10 +1,19 @@
 // 备份助手：把 NAS 上的文件 / 照片批量加入本机下载队列
-import { api } from './syno.uts'
-import { startDownload } from './download_manager.uts'
+import { api, formatSize } from './syno.uts'
+import { startDownload, startDownloadBatch, DlBatchItem } from './download_manager.uts'
 
 export type BackupResult = {
   files: number
   dirs: number
+  truncated: boolean
+}
+
+/** 目录扫描结果（只统计不入队） */
+export type FolderScan = {
+  files: number
+  dirs: number
+  /** 文件总字节数 */
+  totalSize: number
   truncated: boolean
 }
 
@@ -18,20 +27,28 @@ function parentName(p: string): string {
   return ''
 }
 
+/** 让出主线程（批量入队时分批间隙调用，保持 UI 可响应） */
+function yieldToUi(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(() => {
+      resolve()
+    }, ms) as any
+  })
+}
+
 /**
- * 递归备份 NAS 文件夹到本机
- * @param folderPath 起始目录
- * @param maxFiles 单次最多加入的文件数（防止误操作把几万个文件塞进队列）
- * @param onProgress 进度文案回调
+ * 递归扫描 NAS 文件夹（只统计，不入队）
+ * @param maxScan 最多扫描的文件数，超过即停止（防误操作把几万个文件拉进统计）
  */
-export async function backupFolder(
+export async function scanFolder(
   folderPath: string,
-  maxFiles: number,
+  maxScan: number,
   onProgress: (text: string) => void
-): Promise<BackupResult> {
+): Promise<FolderScan> {
   const dirs: Array<string> = [folderPath]
   let i = 0
   let files = 0
+  let totalSize = 0
   let truncated = false
 
   while (i < dirs.length) {
@@ -43,22 +60,104 @@ export async function backupFolder(
       if (it.isDir) {
         dirs.push(it.path)
       } else {
-        if (files >= maxFiles) {
+        if (files >= maxScan) {
+          truncated = true
+          break
+        }
+        files = files + 1
+        totalSize = totalSize + it.size
+      }
+    }
+    if (truncated) break
+    onProgress('已扫描 ' + i.toString() + ' 个目录 · ' + files.toString() + ' 个文件')
+    // 每 5 个目录让一次主线程，保持 UI 可响应
+    if (i % 5 === 0) {
+      await yieldToUi(0)
+    }
+  }
+
+  const r: FolderScan = { files: files, dirs: i, totalSize: totalSize, truncated: truncated }
+  return r
+}
+
+/**
+ * 把 NAS 文件夹内全部文件加入下载队列（分批入队，UI 不卡顿）
+ * @param folderPath 起始目录
+ * @param groupId 批量组 id（取消整组用）
+ * @param groupName 组名（源文件夹名，传输中心显示）
+ * @param maxFiles 单次最多加入的文件数
+ * @param onProgress 进度文案回调（"正在加入 120/800…"）
+ */
+export async function enqueueFolderDownloads(
+  folderPath: string,
+  groupId: string,
+  groupName: string,
+  maxFiles: number,
+  onProgress: (text: string) => void
+): Promise<BackupResult> {
+  const dirs: Array<string> = [folderPath]
+  let i = 0
+  let files = 0
+  let truncated = false
+  let batch: Array<DlBatchItem> = []
+
+  const flush = () => {
+    if (batch.length === 0) return
+    files = files + startDownloadBatch(batch, groupId, groupName)
+    batch = [] as Array<DlBatchItem>
+  }
+
+  while (i < dirs.length) {
+    const cur = dirs[i]
+    i = i + 1
+    const list = await api.listFiles(cur)
+    for (let k = 0; k < list.length; k++) {
+      const it = list[k]
+      if (it.isDir) {
+        dirs.push(it.path)
+      } else {
+        if (files + batch.length >= maxFiles) {
           truncated = true
           break
         }
         const pre = parentName(it.path)
         const saveName = pre.length > 0 ? pre + '_' + it.name : it.name
-        startDownload(api.downloadFileUrl(it.path), saveName, it.path, false)
-        files = files + 1
+        const item: DlBatchItem = { url: api.downloadFileUrl(it.path), name: saveName, nasPath: it.path }
+        batch.push(item)
+        // 每凑满 50 个入队一批，批间让出主线程
+        if (batch.length >= 50) {
+          flush()
+          onProgress('正在加入 ' + files.toString() + ' / ' + maxFiles.toString() + '…')
+          await yieldToUi(30)
+        }
       }
     }
     if (truncated) break
-    onProgress('已扫描 ' + i + ' 个目录 · 加入 ' + files + ' 个文件')
+    if (i % 5 === 0) {
+      await yieldToUi(0)
+    }
   }
+  flush()
 
   const r: BackupResult = { files: files, dirs: i, truncated: truncated }
   return r
+}
+
+/**
+ * 递归备份 NAS 文件夹到本机（旧接口：扫描即入队，供兼容调用）
+ * @param folderPath 起始目录
+ * @param maxFiles 单次最多加入的文件数（防止误操作把几万个文件塞进队列）
+ * @param onProgress 进度文案回调
+ */
+export async function backupFolder(
+  folderPath: string,
+  maxFiles: number,
+  onProgress: (text: string) => void
+): Promise<BackupResult> {
+  const scan = await scanFolder(folderPath, maxFiles, onProgress)
+  const r = await enqueueFolderDownloads(folderPath, 'bk' + Date.now().toString(), parentName(folderPath) || folderPath, maxFiles, onProgress)
+  const res: BackupResult = { files: r.files, dirs: scan.dirs, truncated: scan.truncated || r.truncated }
+  return res
 }
 
 /**

@@ -57,6 +57,18 @@
         <text v-if="finishedDl > 0" class="sum-link" @click="clearDl">清空已结束</text>
       </view>
 
+      <!-- 批量下载组进度（文件夹批量下载） -->
+      <view v-for="(g, gi) in dlGroups" :key="'g' + gi" class="task">
+        <view class="task-head">
+          <text class="task-icon">📁</text>
+          <view class="task-main">
+            <text class="task-name" max-lines="1">批量下载 · {{ g.name }}</text>
+            <text class="task-meta">{{ dlGroupMeta(g) }}</text>
+          </view>
+          <text v-if="g.active" class="task-act task-act-danger" @click="cancelGroup(g.id)">取消整组</text>
+        </view>
+      </view>
+
       <view v-for="(t, index) in dlList" :key="t.id" class="task">
         <view class="task-head">
           <text class="task-icon">{{ iconOf(t.name) }}</text>
@@ -116,6 +128,8 @@ import {
   removeDlTask,
   clearFinishedDlTasks,
   retryDlTask,
+  cancelDlGroup,
+  dlGroupProgress,
   DlTask,
 } from '@/utils/download_manager.uts'
 
@@ -158,6 +172,55 @@ const finishedDl = computed(() => {
   }
   return n
 })
+
+/** 批量下载组的展示行 */
+type DlGroupRow = {
+  id: string
+  name: string
+  total: number
+  done: number
+  failed: number
+  active: boolean
+}
+
+/** 批量下载组（文件夹批量下载）：聚合同组任务，最新的组在上 */
+const dlGroups = computed<Array<DlGroupRow>>(() => {
+  const ids: Array<string> = []
+  const names: Map<string, string> = new Map()
+  for (let i = 0; i < dlList.value.length; i++) {
+    const t = dlList.value[i]
+    if (t.groupId.length === 0) continue
+    if (names.get(t.groupId) == null) {
+      ids.push(t.groupId)
+      names.set(t.groupId, t.groupName)
+    }
+  }
+  const out: Array<DlGroupRow> = []
+  for (let k = ids.length - 1; k >= 0; k--) {
+    const p = dlGroupProgress(ids[k])
+    out.push({
+      id: ids[k],
+      name: names.get(ids[k]) ?? '',
+      total: p.total,
+      done: p.done,
+      failed: p.failed,
+      active: p.active,
+    })
+  }
+  return out
+})
+
+function dlGroupMeta(g: DlGroupRow): string {
+  let s = g.done.toString() + '/' + g.total.toString() + ' 完成'
+  if (g.failed > 0) s = s + ' · 失败 ' + g.failed.toString()
+  if (g.active) s = s + ' · 进行中'
+  return s
+}
+
+function cancelGroup(id: string) {
+  cancelDlGroup(id)
+  uni.showToast({ title: '已取消整组下载', icon: 'none' })
+}
 
 // ---------------- 上传 ----------------
 

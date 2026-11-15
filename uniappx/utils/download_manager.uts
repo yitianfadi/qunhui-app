@@ -17,13 +17,22 @@ export type DlTask = {
   savedPath: string
   error: string
   timeText: string
+  /** 批量分组 id（'' = 单任务），文件夹批量下载的任务共用一个组 */
+  groupId: string
+  /** 批量分组名（源文件夹名），用于传输中心的组进度行 */
+  groupName: string
 }
 
 /** 全局任务列表（跨页面共享，模板中直接遍历） */
 export const dlTaskList = ref<Array<DlTask>>([])
 
-let currentId = ''
-let currentTask: any = null
+/** 同时下载的任务数上限（3 路并发：完成一个自动补位） */
+const MAX_DL_PARALLEL = 3
+
+/** 进行中任务 id（最多 MAX_DL_PARALLEL 个） */
+const activeIds: Array<string> = []
+/** 进行中任务的原生下载对象（abort 用，按任务 id 索引） */
+const activeTasks = new Map<string, any>()
 let seq = 0
 
 function pad2(n: number): string {
@@ -286,6 +295,8 @@ export function startDownload(
     savedPath: '',
     error: '',
     timeText: timeNow(),
+    groupId: '',
+    groupName: '',
   }
 
   // #ifdef WEB
@@ -303,25 +314,85 @@ export function startDownload(
   return t
 }
 
-/** 取最靠后（最早提交）的等待任务开始下载 */
-function pump() {
-  if (currentId.length > 0) return
+/** 批量提交条目 */
+export type DlBatchItem = {
+  url: string
+  name: string
+  nasPath: string
+}
+
+/**
+ * 批量提交下载任务（文件夹批量下载专用）：
+ * - 一次性构建数组后整组插入 reactive 列表（单次数组复制，避免逐个头插时
+ *   每个文件都触发一次列表复制 + 全量重渲染导致 UI 卡死）
+ * - 任务追加到列表末尾（批量任务排到手动任务后面，列表"最近的在上方"不被冲乱）
+ * - 同名且未结束的任务跳过（查重一次遍历完成）
+ * @returns 实际加入的任务数
+ */
+export function startDownloadBatch(items: Array<DlBatchItem>, groupId: string, groupName: string): number {
   const list = dlTaskList.value
-  let nextId = ''
-  for (let i = list.length - 1; i >= 0; i--) {
-    if (list[i].status === 'waiting') {
-      nextId = list[i].id
-      break
+  // 查重表：未结束任务的 name
+  const busy = new Map<string, boolean>()
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i].status
+    if (s === 'waiting' || s === 'downloading') {
+      busy.set(list[i].name, true)
     }
   }
-  if (nextId.length === 0) return
-  const t = findTask(nextId)
-  if (t == null) return
-  runTask(t)
+  const added: Array<DlTask> = []
+  const now = timeNow()
+  for (let k = 0; k < items.length; k++) {
+    const nm = safeFileName(items[k].name)
+    if (busy.get(nm) == true) continue
+    busy.set(nm, true)
+    seq = seq + 1
+    const t: DlTask = {
+      id: 'dl' + Date.now() + '_' + seq,
+      name: nm,
+      nasPath: items[k].nasPath,
+      url: items[k].url,
+      status: 'waiting',
+      percent: 0,
+      sizeText: '等待中…',
+      speedText: '',
+      savedPath: '',
+      error: '',
+      timeText: now,
+      groupId: groupId,
+      groupName: groupName,
+    }
+    added.push(t)
+  }
+  if (added.length > 0) {
+    dlTaskList.value = list.concat(added)
+    // #ifndef WEB
+    pump()
+    // #endif
+  }
+  return added.length
+}
+
+/** 补位启动等待任务，直到占满并发上限 */
+function pump() {
+  while (activeIds.length < MAX_DL_PARALLEL) {
+    const list = dlTaskList.value
+    let nextId = ''
+    // 从最靠后（最早提交）的等待任务开始
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].status === 'waiting') {
+        nextId = list[i].id
+        break
+      }
+    }
+    if (nextId.length === 0) return
+    const t = findTask(nextId)
+    if (t == null) return
+    runTask(t)
+  }
 }
 
 async function runTask(t: DlTask) {
-  currentId = t.id
+  activeIds.push(t.id)
   t.status = 'downloading'
   t.percent = 0
   t.sizeText = '准备中…'
@@ -466,10 +537,10 @@ async function runTask(t: DlTask) {
           finish(false, '', msg)
         },
         complete: () => {
-          currentTask = null
+          activeTasks.delete(t.id)
         },
       })
-      currentTask = task
+      activeTasks.set(t.id, task)
 
       task?.onProgressUpdate((p: any) => {
         if (finished) return
@@ -507,8 +578,14 @@ async function runTask(t: DlTask) {
   } finally {
     finished = true
     clearTimers()
-    currentId = ''
-    currentTask = null
+    // 从并发占用表移除自己，并补位启动下一个等待任务
+    for (let i = 0; i < activeIds.length; i++) {
+      if (activeIds[i] === t.id) {
+        activeIds.splice(i, 1)
+        break
+      }
+    }
+    activeTasks.delete(t.id)
     pump()
   }
 }
@@ -520,14 +597,66 @@ export function cancelDlTask(id: string) {
   if (t.status === 'downloading') {
     t.status = 'canceled'
     t.sizeText = '已取消'
-    if (currentTask != null) {
-      currentTask.abort()
-      currentTask = null
+    const tk = activeTasks.get(id)
+    if (tk != null) {
+      try {
+        tk.abort()
+      } catch (e) {
+        // 原生任务可能已被释放
+      }
+      activeTasks.delete(id)
     }
   } else if (t.status === 'waiting') {
     t.status = 'canceled'
     t.sizeText = '已取消'
   }
+}
+
+/** 取消整组批量任务（文件夹批量下载） */
+export function cancelDlGroup(groupId: string) {
+  const list = dlTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.groupId !== groupId) continue
+    if (t.status === 'waiting') {
+      t.status = 'canceled'
+      t.sizeText = '已取消'
+    } else if (t.status === 'downloading') {
+      t.status = 'canceled'
+      t.sizeText = '已取消'
+      const tk = activeTasks.get(t.id)
+      if (tk != null) {
+        try {
+          tk.abort()
+        } catch (e) {
+          // 原生任务可能已被释放
+        }
+        activeTasks.delete(t.id)
+      }
+    }
+  }
+}
+
+/** 组下载进度：total / done / failed（仅统计该组任务） */
+export type DlGroupProgress = {
+  total: number
+  done: number
+  failed: number
+  active: boolean
+}
+
+export function dlGroupProgress(groupId: string): DlGroupProgress {
+  const r: DlGroupProgress = { total: 0, done: 0, failed: 0, active: false }
+  const list = dlTaskList.value
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.groupId !== groupId) continue
+    r.total = r.total + 1
+    if (t.status === 'done') r.done = r.done + 1
+    else if (t.status === 'failed') r.failed = r.failed + 1
+    if (t.status === 'waiting' || t.status === 'downloading') r.active = true
+  }
+  return r
 }
 
 /** 从列表移除单条记录（不会删除磁盘文件） */
