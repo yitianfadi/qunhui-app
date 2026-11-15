@@ -11,3 +11,4 @@
 - 新增 `setTrustAllCerts`：信任自签 HTTPS 证书（仅影响本插件的 HttpURLConnection 上传通道）
 - 插件自带 `utssdk/app-android/AndroidManifest.xml`，声明 POST_NOTIFICATIONS / USE_BIOMETRIC / USE_FINGERPRINT，打基座时 manifest merger 自动合并
 - config.json 增加 androidx.biometric:biometric:1.1.0 依赖
+- 修复：UTS 版 BioCallback 在云端转译后 onAuthenticationError 报 overrides nothing（云端转译器对 Int/CharSequence 映射与本地不一致），回调类下沉为纯 Kotlin 混编文件 BioNative.kt（package uts.sdk.modules.qhFilePicker），index.uts 通过 Kotlin 函数类型参数传入 success/fail

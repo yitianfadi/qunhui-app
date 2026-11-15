@@ -24,7 +24,6 @@ import BufferedReader from 'java.io.BufferedReader'
 import InputStreamReader from 'java.io.InputStreamReader'
 import Thread from 'java.lang.Thread'
 import Runnable from 'java.lang.Runnable'
-import CharSequence from 'java.lang.CharSequence'
 import Build from 'android.os.Build'
 import Context from 'android.content.Context'
 import NotificationManager from 'android.app.NotificationManager'
@@ -44,6 +43,8 @@ import HostnameVerifier from 'javax.net.ssl.HostnameVerifier'
 import X509Certificate from 'java.security.cert.X509Certificate'
 // Kotlin 原生数组类型（UTS Array 编译为 UTSArray，与系统 API 要求的 kotlin.Array 不兼容）
 import KotlinArray from 'kotlin.Array'
+// 生物识别回调：纯 Kotlin 混编实现，见同目录 BioNative.kt
+import { BioNativeCallback } from './BioNative.kt'
 
 import {
   PickFiles,
@@ -815,57 +816,6 @@ export const isBiometricAvailable: BiometricAvailable = function (): boolean {
   return biometricAvailableInternal()
 }
 
-/**
- * 验证结果桥接：系统回调可能来自我们传入的 executor 线程，
- * 直接调 JS 回调会丢（与上传进度同款问题），必须切回主线程再派发。
- */
-class BioCallback extends BiometricPrompt.AuthenticationCallback {
-  options: BiometricAuthOptions | null = null
-
-  // UTS 继承带构造函数的父类时，必须显式实现构造并调用 super()
-  constructor() {
-    super()
-  }
-
-  override onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-    this.dispatch(0, '')
-  }
-
-  override onAuthenticationError(errorCode: Int, errString: CharSequence) {
-    // 5 = ERROR_USER_CANCELED（点取消/点负面按钮）
-    // 13 = ERROR_NEGATIVE_BUTTON
-    let code = 2
-    if (errorCode.toString() == '5' || errorCode.toString() == '13') {
-      code = 1
-    }
-    this.dispatch(code, errString.toString())
-  }
-
-  override onAuthenticationFailed() {
-    // 单次指纹不匹配，系统会继续弹框让用户重试，不回调 JS
-  }
-
-  /** result: 0 成功 / 1 用户取消 / 2 失败 */
-  dispatch(result: number, msg: string) {
-    const o = this.options
-    if (o == null) {
-      return
-    }
-    this.options = null
-    UTSAndroid.getDispatcher('main').async((_) => {
-      if (result == 0) {
-        o.success?.()
-      } else {
-        const err = new QhPickerFailImpl(result == 1 ? 9020011 : 9020010)
-        if (msg.length > 0) {
-          err.errMsg = msg
-        }
-        o.fail?.(err)
-      }
-    }, null)
-  }
-}
-
 /** 弹出系统生物识别验证框（指纹/面容） */
 export const biometricAuth: BiometricAuth = function (options: BiometricAuthOptions) {
   const act = UTSAndroid.getUniActivity()
@@ -877,8 +827,21 @@ export const biometricAuth: BiometricAuth = function (options: BiometricAuthOpti
     options.fail?.(new QhPickerFailImpl(9020009))
     return
   }
-  const cb = new BioCallback()
-  cb.options = options
+  // BioNativeCallback 为纯 Kotlin 混编实现（BioNative.kt）：
+  // 云端转译器对 override(Int/CharSequence) 的映射与本地不一致，
+  // UTS 版曾报 overrides nothing，故回调类下沉到原生 Kotlin
+  const cb = new BioNativeCallback(
+    () => {
+      options.success?.()
+    },
+    (cancelled: boolean, msg: string) => {
+      const err = new QhPickerFailImpl(cancelled ? 9020011 : 9020010)
+      if (msg.length > 0) {
+        err.errMsg = msg
+      }
+      options.fail?.(err)
+    },
+  )
   const fa = act as FragmentActivity
   const prompt = new BiometricPrompt(fa, Executors.newSingleThreadExecutor(), cb)
   const builder = new BiometricPrompt.PromptInfo.Builder()
