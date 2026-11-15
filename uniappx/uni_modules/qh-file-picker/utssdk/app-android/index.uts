@@ -39,8 +39,11 @@ import HttpsURLConnection from 'javax.net.ssl.HttpsURLConnection'
 import SSLContext from 'javax.net.ssl.SSLContext'
 import SSLSession from 'javax.net.ssl.SSLSession'
 import X509TrustManager from 'javax.net.ssl.X509TrustManager'
+import TrustManager from 'javax.net.ssl.TrustManager'
 import HostnameVerifier from 'javax.net.ssl.HostnameVerifier'
 import X509Certificate from 'java.security.cert.X509Certificate'
+// Kotlin 原生数组类型（UTS Array 编译为 UTSArray，与系统 API 要求的 kotlin.Array 不兼容）
+import KotlinArray from 'kotlin.Array'
 
 import {
   PickFiles,
@@ -771,8 +774,7 @@ export const notifyUploadDone: NotifyUploadDone = function (options: NotifyUploa
     const launch = ctx.getPackageManager().getLaunchIntentForPackage(ctx.getPackageName())
     let pi: PendingIntent | null = null
     if (launch != null) {
-      let req: Int = 0
-      pi = PendingIntent.getActivity(ctx, req, launch, PendingIntent.FLAG_IMMUTABLE)
+      pi = PendingIntent.getActivity(ctx, 0, launch, PendingIntent.FLAG_IMMUTABLE)
     }
     const builder = new NotificationCompat.Builder(ctx, CHANNEL_UPLOAD)
     builder.setSmallIcon(ctx.getApplicationInfo().icon)
@@ -785,7 +787,7 @@ export const notifyUploadDone: NotifyUploadDone = function (options: NotifyUploa
       builder.setContentIntent(pi)
     }
     notifySeq = notifySeq + 1
-    nm.notify(notifySeq, builder.build())
+    nm.notify(notifySeq.toInt(), builder.build())
   } catch (e) {
     // 通知失败不影响业务
   }
@@ -819,6 +821,11 @@ export const isBiometricAvailable: BiometricAvailable = function (): boolean {
  */
 class BioCallback extends BiometricPrompt.AuthenticationCallback {
   options: BiometricAuthOptions | null = null
+
+  // UTS 继承带构造函数的父类时，必须显式实现构造并调用 super()
+  constructor() {
+    super()
+  }
 
   override onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
     this.dispatch(0, '')
@@ -893,14 +900,17 @@ export const biometricAuth: BiometricAuth = function (options: BiometricAuthOpti
 // ---------------------------------------------------------------------------
 
 class TrustAllManager extends X509TrustManager {
-  override checkClientTrusted(chain: Array<X509Certificate>, authType: string) {
+  // X509TrustManager 的方法签名要求 Kotlin 原生 Array（kotlin.Array），
+  // UTS 的 Array 编译为 UTSArray，直接写会报 "overrides nothing"
+  override checkClientTrusted(chain: KotlinArray<X509Certificate>, authType: string): void {
     // 信任所有客户端证书
   }
-  override checkServerTrusted(chain: Array<X509Certificate>, authType: string) {
+  override checkServerTrusted(chain: KotlinArray<X509Certificate>, authType: string): void {
     // 信任所有服务端证书（用户显式开启才生效）
   }
-  override getAcceptedIssuers(): Array<X509Certificate> {
-    return new Array<X509Certificate>()
+  override getAcceptedIssuers(): KotlinArray<X509Certificate> {
+    const empty: Array<X509Certificate> = []
+    return empty.toTypedArray()
   }
 }
 
@@ -920,10 +930,12 @@ export const setTrustAllCerts: SetTrustAllCerts = function (enable: boolean) {
     if (!enable) {
       return
     }
-    const managers = new Array<X509TrustManager>()
-    managers.push(new TrustAllManager())
+    // SSLContext.init 要求 kotlin.Array<TrustManager!>，
+    // 用 UTS 数组 + toTypedArray() 转换（不能直接用 UTS Array<X509TrustManager>）
+    const list: Array<TrustManager> = []
+    list.push(new TrustAllManager())
     const sc = SSLContext.getInstance('TLS')
-    sc.init(null, managers, null)
+    sc.init(null, list.toTypedArray(), null)
     HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory())
     HttpsURLConnection.setDefaultHostnameVerifier(new TrustAllHostnames())
   } catch (e) {
